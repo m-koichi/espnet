@@ -24,8 +24,8 @@ LABELS = {
     'Alarm_bell_ringing'        : 0,
     'Blender'                   : 1,
     'Cat'                       : 2,
-    'Dog'                       : 3,
-    'Dishes'                    : 4,
+    'Dishes'                    : 3,
+    'Dog'                       : 4,
     'Electric_shaver_toothbrush': 5,
     'Frying'                    : 6,
     'Running_water'             : 7,
@@ -35,14 +35,14 @@ LABELS = {
 
 
 # FIXME: remove magic number.
-def make_strong_label_dict(labels: list, n_frames: int=864) -> list:
+def make_strong_label_dict(labels: list, n_frames: int=605, sampling_rate: int=22050, hop_length: int=365) -> list:
     label = np.zeros((len(LABELS), n_frames), dtype=int)
     for metadata in labels:
         onset, offset, event_class = metadata
-        onset = int(float(onset[0]) / 10 * n_frames)
-        offset = int(float(offset[0]) / 10 * n_frames)
+        onset = int(float(onset) * sampling_rate // hop_length)
+        offset = int(float(offset) * sampling_rate // hop_length)
         logging.info(f'{onset} {offset}, {event_class}')
-        label[LABELS[event_class]][onset:offset] = 1
+        label[LABELS[event_class], onset:offset] = 1
     strong_labels = []
     for k, v in LABELS.items():
         strong_label = {

@@ -9,10 +9,17 @@ nj=1
 cmd=run.pl
 train_feat="" # feat.scp for training
 validation_feat="" # feat.scp for validation
+eval_feat="" # feat.scp for evaluation
 label="" # metadata directory e.g. ./DCASE2019_task4/dataset/metadata
 verbose=0
+augment_rep=0
+prefix=""
 filetype=""
 preprocess_conf=""
+
+train_dir=train_22k_mel128
+valid_dir=validation_22k_mel128
+eval_dir=eval_22k_mel128
 
 . utils/parse_options.sh
 
@@ -47,7 +54,7 @@ trap 'rm -rf ${tmpdir}' EXIT
 mkdir -p ${tmpdir}/input
 if [ -n "${train_feat}" ]; then
     for label_type in synthetic unlabel_in_domain weak; do
-        grep ^${label_type} ${train_feat} > ${tmpdir}/input/feats_${label_type}.scp
+        grep ${label_type} ${train_feat} > ${tmpdir}/input/feats_${label_type}.scp
         feat_to_shape.sh --cmd "${cmd}" --nj ${nj} \
                          --filetype "${filetype}" \
                          --preprocess-conf "${preprocess_conf}" \
@@ -58,6 +65,16 @@ fi
 if [ -n "${validation_feat}" ]; then
     for label_type in eval_dcase2018 test_dcase2018 validation; do
         grep ^${label_type} ${validation_feat} > ${tmpdir}/input/feats_${label_type}.scp
+        feat_to_shape.sh --cmd "${cmd}" --nj ${nj} \
+                         --filetype "${filetype}" \
+                         --preprocess-conf "${preprocess_conf}" \
+                         --verbose ${verbose} ${tmpdir}/input/feats_${label_type}.scp ${tmpdir}/input/shape_${label_type}.scp
+    done
+fi
+
+if [ -n "${eval_feat}" ]; then
+    for label_type in eval_dcase2019; do
+        grep ^${label_type} ${eval_feat} > ${tmpdir}/input/feats_${label_type}.scp
         feat_to_shape.sh --cmd "${cmd}" --nj ${nj} \
                          --filetype "${filetype}" \
                          --preprocess-conf "${preprocess_conf}" \
@@ -97,15 +114,41 @@ if [ -n "${label}" ]; then
                     echo ""
                 done > ${tmpdir}/output/label_${label_type}.scp
             done
+
+#        elif [ ${x} = eval ]; then
+#            for label_type in eval_dcase2019; do
+#                csv=${label}/${x}/${label_type}.csv
+#                for id in $(tail -n +2 ${csv} | awk '{print $1}' | uniq); do
+#                    echo -n ${label_type}-$(basename $id .wav)
+#                    cat $csv | grep ^${id} | awk '{printf " %s %s %s", $2, $3, $4}'
+#                    echo ""
+#                done > ${tmpdir}/output/label_${label_type}.scp
+#            done
         fi
     done
 fi
 
 echo "output done"
 
+# perform data augmentation
+if [ ${augment_rep} -gt 0 ] && [ -n "${prefix}" ]; then
+    for label_type in synthetic weak; do
+        mv ${tmpdir}/output/label_${label_type}.scp ${tmpdir}/output/label_${label_type}.bak
+        cat ${tmpdir}/output/label_${label_type}.bak | while read meta; do
+            echo ${meta}
+            for i in `seq 1 ${augment_rep}`; do
+                echo ${prefix}${i}_${meta}
+            done
+        done > ${tmpdir}/output/label_${label_type}.scp
+    done
+fi
+
 # 3. Merge scp files into a JSON file
-for x in train validation; do
-    if [ ${x} = train ]; then
+# for x in train validation; do
+for x in ${train_dir} ${valid_dir} ${eval_dir}; do
+# for x in train_aug; do
+    # if [ ${x} = train ]; then
+   if [ ${x} = ${train_dir} ]; then
         for label_type in synthetic unlabel_in_domain weak; do
             opts=""
             opts+="--input-scps "
@@ -119,7 +162,8 @@ for x in train validation; do
             fi
             ./local/merge_scp2json.py --verbose ${verbose} ${opts} > ./data/${x}/data_${label_type}.json
         done
-    elif [ ${x} = validation ]; then
+
+   elif [ ${x} = ${valid_dir} ]; then
         for label_type in eval_dcase2018 test_dcase2018 validation; do
             opts=""
             opts+="--input-scps "
@@ -131,9 +175,28 @@ for x in train validation; do
                 opts+="--output-scps "
                 opts+="label:${tmpdir}/output/label_${label_type}.scp "
             fi
+            cp ${tmpdir}/input/feats_${label_type}.scp ./data/feats.scp
+            cp ${tmpdir}/output/label_${label_type}.scp ./data/labels.scp
             ./local/merge_scp2json.py --verbose ${verbose} ${opts} > ./data/${x}/data_${label_type}.json
         done
-    fi
+
+   elif [ ${x} = ${eval_dir} ]; then
+        for label_type in eval_dcase2019; do
+            opts=""
+            opts+="--input-scps "
+            opts+="feats:${tmpdir}/input/feats_${label_type}.scp "
+            opts+="shape:${tmpdir}/input/shape_${label_type}.scp:shape "
+#            if [ ${label_type} != unlabel_in_domain ]; then
+#                sort ${tmpdir}/input/feats_${label_type}.scp -o ${tmpdir}/input/feats_${label_type}.scp
+#                sort ${tmpdir}/output/label_${label_type}.scp -o ${tmpdir}/output/label_${label_type}.scp
+#                opts+="--output-scps "
+#                opts+="label:${tmpdir}/output/label_${label_type}.scp "
+#            fi
+#            cp ${tmpdir}/input/feats_${label_type}.scp ./data/feats.scp
+#            cp ${tmpdir}/output/label_${label_type}.scp ./data/labels.scp
+            ./local/merge_scp2json.py --verbose ${verbose} ${opts} > ./data/${x}/data_${label_type}.json
+        done
+   fi
 done
 
 rm -fr ${tmpdir}

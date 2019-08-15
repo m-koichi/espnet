@@ -4,16 +4,17 @@
 #  Apache 2.0  (http://www.apache.org/licenses/LICENSE-2.0)
 
 # Begin configuration section.
-nj=4
-fs=44100
+nj=48
+fs=22050
 fmax=
 fmin=
-n_mels=64
+n_mels=128
 n_fft=2048
-n_shift=511
+n_shift=365
 win_length=
 window=hann
 mono=true
+noise_reduction=false
 write_utt2num_frames=true
 cmd=run.pl
 compress=true
@@ -98,21 +99,21 @@ if [ -f ${data}/segments ]; then
     utils/split_scp.pl ${data}/segments ${split_segments}
 
     ${cmd} JOB=1:${nj} ${logdir}/make_fbank_${name}.JOB.log \
-        compute-fbank-feats.py \
-            --fs ${fs} \
-            --fmax ${fmax} \
-            --fmin ${fmin} \
-            --n_fft ${n_fft} \
-            --n_shift ${n_shift} \
-            --win_length ${win_length} \
-            --window ${window} \
-            --n_mels ${n_mels} \
-            ${write_num_frames_opt} \
-            --compress=${compress} \
-            --filetype ${filetype} \
-            --normalize ${normalize} \
-            --segment=${logdir}/segments.JOB scp:${scp} \
-            ark,scp:${fbankdir}/raw_fbank_${name}.JOB.${ext},${fbankdir}/raw_fbank_${name}.JOB.scp
+        # compute-fbank-feats.py \
+        #     --fs ${fs} \
+        #     --fmax ${fmax} \
+        #     --fmin ${fmin} \
+        #     --n_fft ${n_fft} \
+        #     --n_shift ${n_shift} \
+        #     --win_length ${win_length} \
+        #     --window ${window} \
+        #     --n_mels ${n_mels} \
+        #     ${write_num_frames_opt} \
+        #     --compress=${compress} \
+        #     --filetype ${filetype} \
+        #     --normalize ${normalize} \
+        #     --segment=${logdir}/segments.JOB scp:${scp} \
+        #     ark,scp:${fbankdir}/raw_fbank_${name}.JOB.${ext},${fbankdir}/raw_fbank_${name}.JOB.scp
 
 else
   echo "$0: [info]: no segments file exists: assuming pcm.scp indexed by utterance."
@@ -134,7 +135,8 @@ else
           --window ${window} \
           --n_mels ${n_mels} \
           ${write_num_frames_opt} \
-          --mono True \
+          --mono ${mono} \
+          --noise_reduction ${noise_reduction} \
           --compress=${compress} \
           --filetype ${filetype} \
           --normalize ${normalize} \

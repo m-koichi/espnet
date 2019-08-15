@@ -9,10 +9,62 @@ import logging
 
 import kaldiio
 import numpy
+import pyroomacoustics
 
 from espnet.transform.spectrogram import logmelspectrogram
 from espnet.utils.cli_utils import FileWriterWrapper
 from espnet.utils.cli_utils import get_commandline_args
+
+import numpy as np
+import librosa
+from pyroomacoustics.denoise.iterative_wiener import apply_iterative_wiener
+
+def calculate_mel_spec(x,
+                fs,
+                n_mels,
+                n_fft,
+                n_shift,
+                win_length,
+                fmin,
+                fmax):
+    """
+    Calculate a mal spectrogram from raw audio waveform
+    Note: The parameters of the spectrograms are in the config.py file.
+    Args:
+        audio : numpy.array, raw waveform to compute the spectrogram
+
+    Returns:
+        numpy.array
+        containing the mel spectrogram
+    """
+
+
+    fmin = 0 if fmin is None else fmin
+    fmax = fs / 2 if fmax is None else fmax
+    # Compute spectrogram
+    ham_win = np.hamming(n_fft)
+
+    spec = librosa.stft(
+            x,
+            n_fft=n_fft,
+            hop_length=n_shift,
+            window=ham_win,
+            center=True,
+            pad_mode='reflect'
+    )
+
+    mel_spec = librosa.feature.melspectrogram(
+            S=np.abs(spec),  # amplitude, for energy: spec**2 but don't forget to change amplitude_to_db.
+            sr=fs,
+            n_mels=n_mels,
+            fmin=fmin, fmax=fmax,
+            htk=False, norm=None)
+
+    # if self.save_log_feature:
+    #     mel_spec = librosa.amplitude_to_db(mel_spec)  # 10 * log10(S**2 / ref), ref default is 1
+    mel_spec = mel_spec.T
+    mel_spec = mel_spec.astype(np.float32)
+    return mel_spec
 
 
 def main():
@@ -39,6 +91,8 @@ def main():
                         help='Specify wspecifer for utt2num_frames')
     parser.add_argument('--mono', type=strtobool, default=False,
                         help='Convert to monophonic audio')
+    parser.add_argument('--noise_reduction', type=strtobool, default=False,
+                        help='Apply noise reduction')
     parser.add_argument('--filetype', type=str, default='mat',
                         choices=['mat', 'hdf5'],
                         help='Specify the file format for output. '
@@ -78,6 +132,7 @@ def main():
                               compression_method=args.compression_method
                               ) as writer:
         for utt_id, (rate, array) in reader:
+            print(utt_id)
             assert rate == args.fs
             array = array.astype(numpy.float32)
 
@@ -87,14 +142,31 @@ def main():
             if args.normalize is not None and args.normalize != 1:
                 array = array / (1 << (args.normalize - 1))
 
-            lmspc = logmelspectrogram(
+            if args.noise_reduction:
+                array = apply_iterative_wiener(array,
+                                               frame_len=512,
+                                               lpc_order=20,
+                                               iterations=2,
+                                               alpha=0.8,
+                                               thresh=0.01)
+
+            # lmspc = logmelspectrogram(
+            #     x=array,
+            #     fs=args.fs,
+            #     n_mels=args.n_mels,
+            #     n_fft=args.n_fft,
+            #     n_shift=args.n_shift,
+            #     win_length=args.win_length,
+            #     window=args.window,
+            #     fmin=args.fmin,
+            #     fmax=args.fmax)
+            lmspc = calculate_mel_spec(
                 x=array,
                 fs=args.fs,
                 n_mels=args.n_mels,
                 n_fft=args.n_fft,
                 n_shift=args.n_shift,
                 win_length=args.win_length,
-                window=args.window,
                 fmin=args.fmin,
                 fmax=args.fmax)
             writer[utt_id] = lmspc

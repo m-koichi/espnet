@@ -9,7 +9,7 @@
 # general configuration
 backend=pytorch # pytorch only
 stage=2         # start from 0 if you need to start from data preparation
-stop_stage=100
+stop_stage=2
 ngpu=0          # number of gpus ("0" uses cpu, otherwise use gpu)
 
 model=baseline
@@ -17,6 +17,9 @@ model=baseline
 # FIXME: conda warning; unbound variable
 #set -e
 #set -u
+train_dir=train_22k_mel128
+valid_dir=validation_22k_mel128
+eval_dir=eval_22k_mel128
 
 
 if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
@@ -40,7 +43,9 @@ if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
     ### But you can utilize Kaldi recipes in most cases
     echo "stage 2: Feature Generation"
     # Prepare scp files.
-    python ./local/preprocess_data.py
+    python ./local/preprocess_data.py --train-dir ${train_dir} \
+                                      --valid-dir ${valid_dir} \
+                                      --eval-dir ${eval_dir}
 
     # Data augmentation with RIR reverberation.
     if [ ! -d "RIRS_NOISES" ]; then
@@ -49,19 +54,42 @@ if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
         unzip rirs_noises.zip
         rm rirs_noises.zip
     fi
-    . ./local/RIR_augment.sh data/train
+#    . ./local/RIR_augment.sh data/${train_dir}
 
-    for x in train validation; do
-        for f in text wav.scp utt2spk; do
-            sort data/${x}/${f} -o data/${x}/${f}
-        done
-        utils/utt2spk_to_spk2utt.pl data/${x}/utt2spk > data/${x}/spk2utt
-        . ./local/make_fbank.sh data/${x} exp/make_fbank/${x} fbank
-    done
-    . ./local/data2json.sh --train_feat ./data/train/feats.scp \
-                           --validation_feat ./data/validation/feats.scp \
+    # for x in train validation; do
+#    for x in ${train_dir}; do
+#        for f in text wav.scp utt2spk; do
+#            sort data/${x}/${f} -o data/${x}/${f}
+#        done
+#        utils/utt2spk_to_spk2utt.pl data/${x}/utt2spk > data/${x}/spk2utt
+#        . ./local/make_fbank.sh data/${x} exp/make_fbank/${x} fbank
+#        echo "feature"
+#    done
+
+    # feature extraction
+#    for x in ${train_dir} ${valid_dir} ${eval_dir}; do
+#        for f in text wav.scp utt2spk; do
+#            sort data/${x}/${f} -o data/${x}/${f}
+#        done
+#        utils/utt2spk_to_spk2utt.pl data/${x}/utt2spk > data/${x}/spk2utt
+#        . ./local/make_fbank.sh data/${x} exp/make_fbank/${x} fbank
+#        echo "feature"
+#    done
+
+       # cp
+    # merge data to json file
+    . ./local/data2json.sh --train_feat ./data/${train_dir}/feats.scp \
+                           --validation_feat ./data/${valid_dir}/feats.scp \
+                           --eval_feat ./data/${eval_dir}/feats.scp \
                            --label ./DCASE2019_task4/dataset/metadata \
+                           --train_dir ${train_dir} \
+                           --valid_dir ${valid_dir} \
+                           --eval_dir ${eval_dir} \
                            ./data
+#                           --augment_rep 20 \
+#                           --prefix rvb \
+#                           --eval_feat ./data/eval/feats.scp \
+                        #    ./data
 fi
 
 if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ]; then
