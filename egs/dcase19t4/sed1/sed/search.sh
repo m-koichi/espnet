@@ -1,0 +1,5 @@
+#!/bin/bash
+
+python -u sed/model_tuning.py --model-dir exp2/2019_0611_transformer_fixed_rir0_fm0_pp0_an0_iter30000_ptr1_lossBCE_po-attention_train-original_test-original_opt-noam_mels64_logmel1_tinit-pytorch_tinput-conv2d_tdo0.2_tlr0.01_twu4000_adim128_aheads4_elayers3_eunits512_ag4_ilt2
+
+ # exp2/2019_0609_transformer_rir0_fm0_pp0_an0_iter100000_ptr1_lossBCE_po-attention_train-original_test-original_opt-noam_mels64_logmel1_tinit-pytorch_tinput-conv2d_tdo0.2_tlr0.01_twu25000_adim128_aheads4_elayers3_eunits512_ag2_ilt2
