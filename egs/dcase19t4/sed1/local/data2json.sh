@@ -17,9 +17,9 @@ prefix=""
 filetype=""
 preprocess_conf=""
 
-train_dir=train_22k_mel128
-valid_dir=validation_22k_mel128
-eval_dir=eval_22k_mel128
+train_dir=train_44k_mel128
+valid_dir=validation_44k_mel128
+eval_dir=eval_44k_mel128
 
 . utils/parse_options.sh
 
@@ -89,7 +89,7 @@ mkdir -p ${tmpdir}/output
 if [ -n "${label}" ]; then
     for x in train validation; do
         if [ ${x} = train ]; then
-            for label_type in synthetic weak; do
+            for label_type in synthetic unlabel_in_domain weak; do
                 csv=${label}/${x}/${label_type}.csv
                 if [ ${label_type} = synthetic ]; then
                     for id in $(tail -n +2 ${csv} | awk '{print $1}' | uniq); do

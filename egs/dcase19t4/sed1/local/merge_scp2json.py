@@ -35,7 +35,7 @@ LABELS = {
 
 
 # FIXME: remove magic number.
-def make_strong_label_dict(labels: list, n_frames: int=605, sampling_rate: int=22050, hop_length: int=365) -> list:
+def make_strong_label_dict(labels: list, n_frames: int=864, sampling_rate: int=44100, hop_length: int=511) -> list:
     label = np.zeros((len(LABELS), n_frames), dtype=int)
     for metadata in labels:
         onset, offset, event_class = metadata

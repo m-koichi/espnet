@@ -4,13 +4,13 @@
 #  Apache 2.0  (http://www.apache.org/licenses/LICENSE-2.0)
 
 # Begin configuration section.
-nj=48
-fs=22050
+nj=32
+fs=44100
 fmax=
 fmin=
 n_mels=128
 n_fft=2048
-n_shift=365
+n_shift=511
 win_length=
 window=hann
 mono=true
