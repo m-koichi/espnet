@@ -26,9 +26,8 @@ from models.RNN import BidirectionalGRU
 import config as cfg
 from utils.Logger import LOG
 from utils.utils import weights_init, ManyHotEncoder, SaveBest
-from evaluation_measures import compute_strong_metrics, segment_based_evaluation_df
 from utils import ramps
-
+from evaluation_measures import compute_strong_metrics, segment_based_evaluation_df
 import pdb
 
 from dataset import SEDDataset
@@ -69,6 +68,18 @@ from model_tuning import search_best_threshold, search_best_median, search_best_
 
 import mlflow
 from solver.transformer import Transformer, TransformerSolver
+from functools import wraps
+from radam import RAdam
+
+def elapsed_time(f):
+    @wraps(f)
+    def wrapper(*args, **kwds):
+        start = time()
+        result = f(*args, **kwds)
+        elapsed = time() - start
+        print("%s took %d time to finish" % (f.__name__, elapsed))
+        return result
+    return wrapper
 
 global_step = 0
 
@@ -231,6 +242,8 @@ def train_strong_weak(strong_loader, weak_loader, model, optimizer, epoch, logge
     # LOG.debug("Nb batches: {}".format(len(train_loader)))
     avg_strong_loss = 0
     avg_weak_loss = 0
+    
+    start = time.time()
 
     for i, ((s_batch_input, s_target, s_data), (w_batch_input, w_target, w_data)) in \
             enumerate(zip(strong_loader, weak_loader)):
@@ -264,6 +277,9 @@ def train_strong_weak(strong_loader, weak_loader, model, optimizer, epoch, logge
     LOG.info(f'after {epoch} epoch')
     LOG.info(f'\tAve. strong class loss: {avg_strong_loss}')
     LOG.info(f'\tAve. weak class loss: {avg_weak_loss}')
+    
+    elapsed_time = time.time() - start
+    print(f'1 epoch finished. Elapsed time: {elapsed_time}')
 
 
 # class TrainingSignalAnnealing:
@@ -438,11 +454,11 @@ def train_one_step(strong_loader, weak_loader, model, optimizer, logger, loss_fu
     avg_strong_loss = 0
     avg_weak_loss = 0
 
-    # sample_rate = 44100 if args.n_frames == 864 else 16000
-    # hop_length = 511 if args.n_frames == 864 else 320
+    sample_rate = 44100 if args.n_frames == 864 else 16000
+    hop_length = 511 if args.n_frames == 864 else 320
 
-    sample_rate = 22050
-    hop_length = 365
+#     sample_rate = 22050
+#     hop_length = 365
 
     strong_iter = cycle_iteration(strong_loader)
     weak_iter = cycle_iteration(weak_loader)
@@ -484,8 +500,11 @@ def train_one_step(strong_loader, weak_loader, model, optimizer, logger, loss_fu
                 predictions = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
                                                     # post_processing=args.use_post_processing,
                                                     save_predictions=os.path.join(exp_name, 'predictions',
-                                                                                  f'result_{i}.csv'))
-                valid_events_metric = compute_strong_metrics(predictions, validation_df)
+                                                                                  f'result_{i}.csv'),
+                                                    transforms=None, mode='validation', logger=None,
+                                                    pooling_time_ratio=1., sample_rate=sample_rate, hop_length=hop_length)
+                valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=args.pooling_time_ratio,
+                                                             sample_rate=sample_rate, hop_length=hop_length)
                 valid_segments_metric = segment_based_evaluation_df(validation_df, predictions,
                                                                     time_resolution=float(args.pooling_time_ratio))
                 # valid_events_metric = compute_strong_metrics(predictions, validation_df, 8)
@@ -679,14 +698,20 @@ def train_one_step_ema(strong_loader, weak_loader, unlabel_loader, model, ema_mo
                 predictions = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
                                                     post_processing=args.use_post_processing,
                                                     save_predictions=os.path.join(exp_name, 'predictions',
-                                                                                  f'result_{i}.csv'))
-                valid_events_metric = compute_strong_metrics(predictions, validation_df)
+                                                                                  f'result_{i}.csv'),
+                                                    transforms=None, mode='validation', logger=None,
+                                                    pooling_time_ratio=1., sample_rate=sample_rate, hop_length=hop_length)
+                valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=args.pooling_time_ratio,
+                                                             sample_rate=sample_rate, hop_length=hop_length)
 
                 predictions = get_batch_predictions(ema_model, valid_loader, many_hot_encoder.decode_strong,
                                                     post_processing=args.use_post_processing,
                                                     save_predictions=os.path.join(exp_name, 'predictions',
-                                                                                  f'ema_result_{i}.csv'))
-                ema_valid_events_metric = compute_strong_metrics(predictions, validation_df)
+                                                                                  f'ema_result_{i}.csv'),
+                                                    transforms=None, mode='validation', logger=None,
+                                                    pooling_time_ratio=1., sample_rate=sample_rate, hop_length=hop_length)
+                ema_valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=args.pooling_time_ratio,
+                                                                 sample_rate=sample_rate, hop_length=hop_length)
 
             state['model']['state_dict'] = model.state_dict()
             # state['model_ema']['state_dict'] = crnn_ema.state_dict()
@@ -1144,6 +1169,8 @@ def get_batch_predictions(model, data_loader, decoder, post_processing=[functool
     prediction_df = pd.DataFrame()
     avg_strong_loss = 0
     avg_weak_loss = 0
+    
+    start = time.time()
     for batch_idx, (batch_input, target, data_ids) in enumerate(data_loader):
 
         if tta != 1:
@@ -1184,6 +1211,8 @@ def get_batch_predictions(model, data_loader, decoder, post_processing=[functool
         pred_strong = pred_strong.cpu().data.numpy()
         pred_strong = ProbabilityEncoder().binarization(pred_strong, binarization_type="global_threshold",
                                                         threshold=0.5)
+        
+        post_processing = None
 
         for pred, data_id in zip(pred_strong, data_ids):
             # pred = post_processing(pred)
@@ -1209,6 +1238,12 @@ def get_batch_predictions(model, data_loader, decoder, post_processing=[functool
     if mode == 'validation' and logger is not None:
         logger.scalar_summary('valid_strong_loss', avg_strong_loss, global_step)
         logger.scalar_summary('valid_weak_loss', avg_weak_loss, global_step)
+        
+    elapsed_time = time.time() - start
+    print(f'prediction finished. elapsed time: {elapsed_time}')
+    print(f'valid_strong_loss: {avg_strong_loss}')
+    print(f'valid_weak_loss: {avg_weak_loss}')
+    
     return prediction_df
 
 
@@ -1587,7 +1622,7 @@ def main(args):
                         help='The configuration file for the pre-processing')
     # optimization related
     parser.add_argument('--opt', default='adam', type=str,
-                        choices=['adadelta', 'adam', 'adabound'],
+                        choices=['adadelta', 'adam', 'adabound', 'radam'],
                         help='Optimizer')
     parser.add_argument('--lr', default=1e-3, type=float,
                         help='Learning rate')
@@ -1946,11 +1981,11 @@ def main(args):
     # for param in crnn_ema.parameters():
     #     param.detach_()
 
-    # sample_rate = 44100 if args.n_frames == 864 else 16000
-    # hop_length = 511 if args.n_frames == 864 else 320
+    sample_rate = 44100 if args.n_frames == 864 else 16000
+    hop_length = 511 if args.n_frames == 864 else 320
 
-    sample_rate = 22050
-    hop_length = 365
+#     sample_rate = 22050
+#     hop_length = 365
 
     # summary(crnn, (1, 864, 64))
     # pdb.set_trace()
@@ -1962,10 +1997,11 @@ def main(args):
     elif args.opt == 'adabound':
         optimizer = adabound.AdaBound(filter(lambda p: p.requires_grad, crnn.parameters()),
                                       lr=args.lr, final_lr=args.final_lr)
-
+    elif args.opt == 'radam':
+        optimizer = RAdam(filter(lambda p: p.requires_grad, crnn.parameters()), **optim_kwargs)
     # scheduler = CosineAnnealingLR(optimizer, T_max=args.T_max, eta_min=args.eta_min)
 
-    optim_kwargs = {"lr": args.lr, "betas": (0.9, 0.999)}
+#     optim_kwargs = {"lr": args.lr, "betas": (0.9, 0.999)}
     # if args.model == 'unet':
     #     net = UNet1D(n_channels=args.mels, n_classes=10).to('cuda')
     #     # summary(net, (64, 864))
@@ -2336,8 +2372,11 @@ def main(args):
             with torch.no_grad():
                 predictions = get_batch_predictions(crnn, valid_loader, many_hot_encoder.decode_strong,
                                                     save_predictions=os.path.join(exp_name, 'predictions',
-                                                                                  f'result_{epoch}.csv'))
-                valid_events_metric = compute_strong_metrics(predictions, validation_df)
+                                                                                  f'result_{epoch}.csv'),
+                                                    transforms=None, mode='validation', logger=None,
+                                                    pooling_time_ratio=1., sample_rate=sample_rate, hop_length=hop_length)
+                valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=args.pooling_time_ratio,
+                                                             sample_rate=sample_rate, hop_length=hop_length)
                 # valid_segments_metric = segment_based_evaluation_df(validation_df, predictions, time_resolution=float(args.pooling_time_ratio))
                 # valid_events_metric = compute_strong_metrics(predictions, validation_df, 8)
             state['model']['state_dict'] = crnn.state_dict()
@@ -2376,8 +2415,11 @@ def main(args):
     crnn.load(parameters=params['model']['state_dict'])
 
     predictions = get_batch_predictions(crnn, valid_loader, many_hot_encoder.decode_strong,
-                                        save_predictions=os.path.join(exp_name, 'predictions', f'result_{epoch}.csv'))
-    valid_events_metric = compute_strong_metrics(predictions, validation_df)
+                                        save_predictions=os.path.join(exp_name, 'predictions', f'result_{epoch}.csv'),
+                                        transforms=None, mode='validation', logger=None,
+                                        pooling_time_ratio=1., sample_rate=sample_rate, hop_length=hop_length)
+    valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=args.pooling_time_ratio,
+                                                 sample_rate=sample_rate, hop_length=hop_length)
     best_th, best_f1 = search_best_threshold(crnn, valid_loader, validation_df, many_hot_encoder, step=0.1,
                                              sample_rate=sample_rate, hop_length=hop_length)
     best_fs, best_f1 = search_best_median(crnn, valid_loader, validation_df, many_hot_encoder,

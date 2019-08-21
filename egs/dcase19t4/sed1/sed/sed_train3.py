@@ -54,6 +54,8 @@ from dcase_util.data import ProbabilityEncoder
 
 from distutils.util import strtobool
 
+from radam import RAdam
+
 from solver.transformer import Transformer, TransformerSolver
 
 from model_tuning import search_best_threshold, search_best_median, search_best_accept_gap, \
@@ -77,7 +79,7 @@ def train(solver, validation_loader, validation_df, decoder, args, exp_name, ite
             predictions = solver.get_predictions(validation_loader, decoder,
                                                  save_predictions=os.path.join(exp_name, 'predictions',
                                                                                f'iteration_{i}.csv'))
-            valid_events_metric = compute_strong_metrics(predictions, validation_df, args.pooling_time_ratio,
+            valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=args.pooling_time_ratio,
                                                          sample_rate=sample_rate, hop_length=hop_length)
             # valid_segments_metric = segment_based_evaluation_df(validation_df, predictions,
             #                                                     time_resolution=float(args.pooling_time_ratio))
@@ -116,6 +118,8 @@ def main(args):
     # general configuration
     parser.add_argument('--ngpu', default=0, type=int,
                         help='Number of GPUs')
+    parser.add_argument('--gpu-id', default="0", type=str,
+                        help='set visible gpu id')
     parser.add_argument('--outdir', type=str, default='../exp/results',
                         help='Output directory')
     parser.add_argument('--debugmode', default=1, type=int,
@@ -155,7 +159,7 @@ def main(args):
     # minibatch related
     parser.add_argument('--sortagrad', default=0, type=int, nargs='?',
                         help="How many epochs to use sortagrad for. 0 = deactivated, -1 = all epochs")
-    parser.add_argument('--batch-size', '-b', default=16, type=int,
+    parser.add_argument('--batch-size', '-b', default=8, type=int,
                         help='Batch size')
     parser.add_argument('--maxlen-in', default=800, type=int, metavar='ML',
                         help='Batch size is reduced if the input sequence length > ML')
@@ -167,7 +171,7 @@ def main(args):
                         help='The configuration file for the pre-processing')
     # optimization related
     parser.add_argument('--opt', default='noam', type=str,
-                        choices=['adadelta', 'adam', 'noam'],
+                        choices=['adadelta', 'adam', 'noam', 'radam'],
                         help='Optimizer')
     # parser.add_argument('--lr', default=1e-3, type=float,
     #                     help='Learning rate')
@@ -216,7 +220,7 @@ def main(args):
     parser.add_argument('--test-data', default='original', type=str,
                         choices=['original', 'noise_reduction'],
                         help='test data')
-    parser.add_argument('--n-frames', default=500, type=int,
+    parser.add_argument('--n-frames', default=864, type=int,
                         help='input frame length')
     parser.add_argument('--mels', default=128, type=int,
                         help='Number of feature mel bins')
@@ -248,6 +252,8 @@ def main(args):
     parser.add_argument('--accum-grad', default=2, type=int)
 
     args = parser.parse_args(args)
+    
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
 
     if args.input_layer_type == 1:
         args.transformer_input_layer = 'linear'
@@ -563,7 +569,7 @@ def main(args):
     params = torch.load(os.path.join(exp_name, 'model', f"iteration_{args.iterations}.pth"))
     solver.load(parameters=params)
 
-    predictions = TransformerSolver.get_batch_predictions(solver, valid_loader, many_hot_encoder.decode_strong,
+    predictions = TransformerSolver.get_predictions(solver, valid_loader, many_hot_encoder.decode_strong,
                                                           post_processing=args.use_post_processing,
                                                           save_predictions=os.path.join(exp_name, 'predictions',
                                                                                         f'result.csv'))

@@ -2,6 +2,7 @@
 
 python -u sed/sed_train3.py --batch-size 16 \
                            --ngpu 1 \
+                           --gpu-id 0 \
                            --seed 1 \
                            --tensorboard-dir tensorboard \
                            --use-rir-augmentation False \
@@ -18,7 +19,7 @@ python -u sed/sed_train3.py --batch-size 16 \
                            --pooling-operator attention \
                            --train-data original \
                            --test-data original \
-                           --n-frames 500 \
+                           --n-frames 864 \
                            --dropout 0.2 \
                            --dropout-rate 0.2 \
                            --mels 128 \
@@ -28,7 +29,7 @@ python -u sed/sed_train3.py --batch-size 16 \
                            --transformer-input-layer linear \
                            --transformer-attn-dropout-rate 0.2 \
                            --transformer-lr 0.01 \
-                           --transformer-warmup-steps 4000 \
+                           --transformer-warmup-steps 1000 \
                            --transformer-length-normalized-loss True \
                            --adim 128 \
                            --aheads 4 \
