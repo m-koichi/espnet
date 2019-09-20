@@ -5,12 +5,12 @@
 
 # Begin configuration section.
 nj=32
-fs=44100
+fs=16000
 fmax=
 fmin=
-n_mels=128
-n_fft=2048
-n_shift=511
+n_mels=64
+n_fft=1280
+n_shift=320
 win_length=
 window=hann
 mono=true

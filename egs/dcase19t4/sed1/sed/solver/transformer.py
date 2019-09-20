@@ -1,12 +1,13 @@
 import torch
 
 from espnet.nets.pytorch_backend.transformer.encoder import Encoder
+from espnet.nets.pytorch_backend.transformer.decoder import Decoder
 from espnet.nets.pytorch_backend.transformer.layer_norm import LayerNorm
 from espnet.nets.pytorch_backend.transformer.optimizer import get_std_opt
 
 from espnet.nets.pytorch_backend.transformer.label_smoothing_loss import LabelSmoothingLoss
 from dcase_util.data import ProbabilityEncoder
-from utils.utils import AverageMeterSet, weights_init, ManyHotEncoder, SaveBest
+from utils.utils import AverageMeter, weights_init, ManyHotEncoder, SaveBest
 from utils import ramps
 import pandas as pd
 import re
@@ -14,11 +15,50 @@ import re
 import logging
 import math
 
-from solver.baseline_model import CNN
+from solver.baseline_model import CNN, BidirectionalGRU
 
 from logger import Logger
+from tensorboardX import SummaryWriter
+import mlflow
+import ipdb
+from focal_loss import FocalLoss
+
+from my_utils import ConfMat
+from sklearn.metrics import confusion_matrix
+import numpy as np
+from CB_loss import CBLoss
 
 logging.basicConfig(level=logging.DEBUG)
+
+
+CLASSES = {
+    'Alarm_bell_ringing'        : 0,
+    'Blender'                   : 1,
+    'Cat'                       : 2,
+    'Dishes'                    : 3,
+    'Dog'                       : 4,
+    'Electric_shaver_toothbrush': 5,
+    'Frying'                    : 6,
+    'Running_water'             : 7,
+    'Speech'                    : 8,
+    'Vacuum_cleaner'            : 9
+}
+
+weak_samples_list = [192, 125, 164, 177, 208, 97, 165, 322, 522, 162]
+strong_samples_list = [40092, 69093, 28950, 23370, 25153, 51504, 34489, 30453, 122494, 53418]
+
+weak_class_weights = np.sum(weak_samples_list) / (len(CLASSES) * np.array(weak_samples_list))
+strong_class_weights = np.sum(strong_samples_list) / (len(CLASSES) * np.array(strong_samples_list))
+
+def cycle_iteration(iterable):
+    while True:
+        for i in iterable:
+            yield i
+
+def log_scalar(writer, name, value, step):
+    """Log a scalar value to both MLflow and TensorBoard"""
+    writer.add_scalar(name, value, step)
+    mlflow.log_metric(name, value)
 
 
 class Transformer(torch.nn.Module):
@@ -27,30 +67,86 @@ class Transformer(torch.nn.Module):
                  n_class,
                  args,
                  pooling='attention',
+                 classifier='linear',
                  input_conv=False,
-                 cnn_kwargs=None):
+                 cnn_kwargs=None,
+                 cnn_pretrained=False,
+                 pos_enc=True,
+                 n_frames=496):
         super(Transformer, self).__init__()
         self.args = args
+        self.pooling = pooling
         self.input_conv = input_conv
         if input_conv:
             self.cnn = CNN(n_in_channel=1, activation="Relu", conv_dropout=args.dropout, **cnn_kwargs)
-        self.encoder = Encoder(input_dim, args)
-        self.classifier = torch.nn.Linear(args.adim, n_class)
+            if cnn_pretrained:
+                self.cnn.load(hogehoge)
+                # TODO freeze weight
+        self.encoder = Encoder(input_dim, args, pos_enc=pos_enc)
+        if classifier == 'linear':
+            self.classifier = torch.nn.Linear(args.adim, n_class)
+            self.weak_classifier = torch.nn.Linear(args.adim, n_class)
+        elif classifier == 'conv':
+            raise NotImplementedError
+        elif classifier == 'dense':
+            self.classifier = torch.nn.Linear(args.adim, n_class)
+            self.weak_classifier = torch.nn.Linear(args.adim * n_frames, n_class)
+        elif classifier == 'rnn':
+            self.classifier = torch.nn.Sequential(
+                                BidirectionalGRU(args.adim, args.adim, dropout=args.dropout, num_layers=2),
+                                torch.nn.Linear(args.adim*2, n_class)
+                              )
+            self.weak_classifier = torch.nn.Sequential(
+                                BidirectionalGRU(args.adim, args.adim, dropout=args.dropout, num_layers=2),
+                                torch.nn.Linear(args.adim*2, n_class)
+                              )
+        elif classifier == 'transformer':
+            self.pooling = 'transformer'
+            self.rnn = torch.nn.Sequential(
+                                BidirectionalGRU(args.mels, args.adim//2, dropout=args.dropout, num_layers=2),
+                                torch.nn.Linear(args.adim, args.adim)
+                              )
+            self.classifier = torch.nn.Sequential(
+                        torch.nn.Linear(args.adim, n_class),
+                        torch.nn.Sigmoid()
+                    )
+            self.weak_classifier = torch.nn.Sequential(
+                        torch.nn.Linear(args.adim, n_class),
+                        torch.nn.Sigmoid()
+                    )
+        else:
+            ValueError
         self.dense = torch.nn.Linear(args.adim, n_class)
         self.sigmoid = torch.sigmoid
-        self.softmax = torch.nn.Softmax(dim=-1)
-        self.pooling = pooling
-        self.reset_parameters(args)
-
+        self.softmax = torch.nn.Softmax(dim=-1)      
+        self.reset_parameters(args)        
+        self.pool = torch.nn.MaxPool2d((args.pooling_time_ratio, 1))
+        
+        print(f'transformer structure; \n\t input_conv:{input_conv} \n\t classifier:{classifier}')
+        
     def forward(self, x, mask=None):
         if self.input_conv:
             x = self.cnn(x)
             x = x.squeeze(-1).permute(0, 2, 1)
+
         if self.args.input_layer_type == 3:
             x = x.squeeze(1)
-        # import ipdb
-        # ipdb.set_trace()
-        x, _ = self.encoder(x, mask)
+            x = self.pool(x)
+            
+        elif self.args.input_layer_type == 4:
+            x = self.rnn(x)
+            x[:, 0, :] = 1
+        
+        # Encoder
+        x, x_mask = self.encoder(x, mask)
+        
+#         # Decoder
+#         elif self.pooling == 'transformer':
+#             weak = torch.sigmoid(self.weak_classifier(x[:, 0, :]))
+#             strong = torch.sigmoid(self.classifier(x[:, 1:, :]))
+#             return strong, weak
+            
+        
         strong = torch.sigmoid(self.classifier(x))
         if self.pooling == 'attention':
             sof = self.dense(x)  # [bs, frames, nclass]
@@ -61,8 +157,14 @@ class Transformer(torch.nn.Module):
             weak = strong.mean(1)
         elif self.pooling == 'max':
             weak = strong.max(1)[0]
+        elif self.pooling == 'test':
+            weak = torch.sigmoid(self.weak_classifier(x[:, 0, :]))
+            strong[:, 0, :] = 0
+        elif self.pooling == 'dense':
+            weak = torch.sigmoid(self.weak_classifier(x.view(-1, x.size(1) * x.size(2))))
         return strong, weak
 
+    
     def reset_parameters(self, args):
         if args.transformer_init == "pytorch":
             return
@@ -88,7 +190,7 @@ class Transformer(torch.nn.Module):
             if isinstance(m, (torch.nn.Embedding, LayerNorm)):
                 m.reset_parameters()
 
-    def save(self, filename):
+    def _save(self, filename):
         parameters = {
             'encoder'   : self.encoder.state_dict(),
             'classifier': self.classifier.state_dict(),
@@ -98,7 +200,7 @@ class Transformer(torch.nn.Module):
             parameters['cnn'] = self.cnn.state_dict()
         torch.save(parameters, filename)
 
-    def load(self, filename=None, parameters=None):
+    def _load(self, filename=None, parameters=None):
         if filename is not None:
             parameters = torch.load(filename)
         if parameters is None:
@@ -126,7 +228,9 @@ class TransformerSolver(object):
                  exp_name='tensorboard/log',
                  optimizer='noam',
                  consistency_cost=2,
-                 data_parallel=True):
+                 data_parallel=True,
+                writer=None,
+                mode='SED'):
         self.model = model.cuda() if torch.cuda.is_available() else model
         self.ema_model = ema_model.cuda() if torch.cuda.is_available() else ema_model
         if data_parallel:
@@ -134,14 +238,26 @@ class TransformerSolver(object):
             self.ema_model = torch.nn.DataParallel(self.ema_model)
 
         self.criterion = criterion
+        if criterion == 'BCE':
+            self.strong_criterion = torch.nn.BCELoss().cuda()
+            self.weak_criterion = torch.nn.BCELoss().cuda()
+        elif criterion == 'FocalLoss':
+            self.strong_criterion = FocalLoss(gamma=2).cuda()
+            self.weak_criterion = torch.nn.BCELoss().cuda()
+        elif criterion == 'CBLoss':
+            self.strong_criterion = CBLoss(samples_per_cls=torch.from_numpy(strong_class_weights),
+                                       loss_type='FocalLoss').to('cuda')
+            self.weak_criterion = CBLoss(samples_per_cls=torch.from_numpy(weak_class_weights),
+                                     ).to('cuda')
+            
         self.consistency_criterion = consistency_criterion
         self.optimizer = optimizer
         self.accum_grad = accum_grad
         self.grad_clip_threshold = 5
 
-        self.strong_loader = strong_loader
-        self.weak_loader = weak_loader
-        self.unlabel_loader = unlabel_loader
+        self.strong_iter = cycle_iteration(strong_loader)
+        self.weak_iter = cycle_iteration(weak_loader)
+        self.unlabel_iter = cycle_iteration(unlabel_loader)
 
         self.forward_count = 0
         self.rampup_length = rampup_length
@@ -149,26 +265,23 @@ class TransformerSolver(object):
         self.args = args
 
         self.max_consistency_cost = consistency_cost
-        self.strong_losses = AverageMeterSet()
-        self.weak_losses = AverageMeterSet()
+        self.strong_losses = AverageMeter()
+        self.weak_losses = AverageMeter()
         self.logger = Logger(exp_name.replace('exp', 'tensorboard'))
+        self.writer = writer
         # self.criterion = LabelSmoothingLoss(n_class, -1, 0.1, False, criterion)
 
     def set_optimizer(self, args):
-        self.optimizer = get_std_opt(self.model, args.adim, args.transformer_warmup_steps, args.transformer_lr)
-
+        if args.opt == 'noam':
+            self.optimizer = get_std_opt(self.model, args.adim, args.transformer_warmup_steps, args.transformer_lr)
+        elif args.opt == 'adam':
+            self.optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.model.parameters()), lr=args.transformer_lr, betas=(0.9, 0.98), eps=1e-9)
+            
     def train_one_step(self, log_interbal=100, warm_start=True):
         self.model.train()
-        try:
-            strong_sample, strong_target, _ = next(self.strong_iter)
-        except:
-            self.strong_iter = iter(self.strong_loader)
-            strong_sample, strong_target, _ = next(self.strong_iter)
-        try:
-            weak_sample, weak_target, _ = next(self.weak_iter)
-        except:
-            self.weak_iter = iter(self.weak_loader)
-            weak_sample, weak_target, _ = next(self.weak_iter)
+        strong_sample, strong_target, _, strong_mask = next(self.strong_iter)
+        weak_sample, weak_target, _, weak_mask = next(self.weak_iter)
+
         # try:
         #     unlabel_sample, _, _ = next(self.unlabel_iter)
         # except:
@@ -177,40 +290,142 @@ class TransformerSolver(object):
 
         strong_sample = strong_sample.cuda()
         weak_sample = weak_sample.cuda()
-        # unlabel_sample = unlabel_sample.squeeze(1).cuda()
+
         strong_target = strong_target.cuda()
         weak_target = weak_target.cuda()
+        
+        strong_mask = strong_mask.cuda()
+        weak_mask = weak_mask.cuda()
 
-        pred_strong, pred_weak = self.model(strong_sample)
-        strong_loss = self.criterion(pred_strong, strong_target)
+        pred_strong, pred_weak = self.model(strong_sample, strong_mask)
+        strong_loss = self.strong_criterion(pred_strong, strong_target)
 
-        pred_strong, pred_weak = self.model(weak_sample)
-        weak_loss = self.criterion(pred_weak, weak_target)
+        pred_strong, pred_weak = self.model(weak_sample, weak_mask)
+        weak_loss = self.weak_criterion(pred_weak, weak_target)
 
-        loss = (strong_loss + weak_loss) / self.accum_grad
+        if self.model.pooling == 'test':
+            loss = (strong_loss + weak_loss) / self.accum_grad
+        elif self.criterion == 'BCE':
+            loss = (strong_loss + weak_loss) / self.accum_grad
+        elif self.criterion == 'FocalLoss':
+            loss = (10 * strong_loss + weak_loss) / self.accum_grad
+        elif self.criterion == 'CBLoss':
+            loss = (strong_loss + weak_loss) / self.accum_grad
         loss.backward() # Backprop
         loss.detach() # Truncate the graph
 
-        self.logger.scalar_summary('train_strong_loss', strong_loss.item(), self.forward_count)
-        self.logger.scalar_summary('train_weak_loss', weak_loss.item(), self.forward_count)
+        self.strong_losses.update(strong_loss.item())
+        self.weak_losses.update(weak_loss.item())
+#         self.logger.scalar_summary('train_strong_loss', strong_loss.item(), self.forward_count)
+#         self.logger.scalar_summary('train_weak_loss', weak_loss.item(), self.forward_count)
 
         self.forward_count += 1
         if self.forward_count % log_interbal == 0:
+            self.logger.scalar_summary('train_strong_loss', self.strong_losses.avg, self.forward_count)
+            self.logger.scalar_summary('train_weak_loss', self.weak_losses.avg, self.forward_count)
+            
             logging.info('After {} iteration'.format(self.forward_count))
-            logging.info('\tstrong loss: {}'.format(strong_loss.item()))
-            logging.info('\tweak loss: {}'.format(weak_loss.item()))
-        if self.forward_count % self.accum_grad == 0:
+            logging.info('\t Ave. strong loss: {}'.format(self.strong_losses.avg))
+            logging.info('\t Ave. weak loss: {}'.format(self.weak_losses.avg))
+            
+            
+            log_scalar(self.writer, 'train_strong_loss', self.strong_losses.avg, self.forward_count)
+            log_scalar(self.writer, 'train_weak_loss', self.weak_losses.avg, self.forward_count)
+            
+            self.strong_losses.reset()
+            self.weak_losses.reset()
+        if self.forward_count % self.accum_grad != 0:
             return
         # self.forward_count = 0
         # compute the gradient norm to check if it is normal or not
         grad_norm = torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(), self.grad_clip_threshold)
-        logging.info('grad norm={}'.format(grad_norm))
+        # logging.info('grad norm={}'.format(grad_norm))
         if math.isnan(grad_norm):
             logging.warning('grad norm is nan. Do not update model.')
         else:
             self.optimizer.step()
         self.optimizer.zero_grad()
+        
+    def train_one_step_at(self, log_interbal=100, warm_start=True):
+        self.model.train()
+#         strong_sample, strong_target, _, strong_mask = next(self.strong_iter)
+        weak_sample, weak_target, _, weak_mask = next(self.weak_iter)
+#         try:
+#             strong_sample, strong_target, _ = next(self.strong_iter)
+#         except:
+#             self.strong_iter = iter(self.strong_loader)
+#             strong_sample, strong_target, _ = next(self.strong_iter)
+#         try:
+#             weak_sample, weak_target, _ = next(self.weak_iter)
+#         except:
+#             self.weak_iter = iter(self.weak_loader)
+#             weak_sample, weak_target, _ = next(self.weak_iter)
+        # try:
+        #     unlabel_sample, _, _ = next(self.unlabel_iter)
+        # except:
+        #     self.unlabel_iter = iter(self.unlabel_loader)
+        #     unlabel_sample, _, _ = next(self.unlabel_iter)
+
+#         strong_sample = strong_sample.cuda()
+        weak_sample = weak_sample.cuda()
+        # unlabel_sample = unlabel_sample.squeeze(1).cuda()
+#         strong_target = strong_target.cuda()
+        weak_target = weak_target.cuda()
+        
+#         strong_mask = strong_mask.cuda()
+        weak_mask = weak_mask.cuda()
+
+#         pred_strong, pred_weak = self.model(strong_sample, strong_mask, strong_target)
+#         strong_loss = self.strong_criterion(pred_strong, strong_target)
+
+        pred_strong, pred_weak = self.model(weak_sample, weak_mask)
+        weak_loss = self.weak_criterion(pred_weak, weak_target)
+
+        if self.model.pooling == 'test':
+            loss = weak_loss / self.accum_grad
+        elif self.criterion == 'BCE':
+            loss = weak_loss / self.accum_grad
+        elif self.criterion == 'FocalLoss':
+            loss = weak_loss / self.accum_grad
+        elif self.criterion == 'CBLoss':
+            loss = weak_loss / self.accum_grad
+        loss.backward() # Backprop
+        loss.detach() # Truncate the graph
+
+#         self.strong_losses.update(strong_loss.item())
+        self.weak_losses.update(weak_loss.item())
+#         self.logger.scalar_summary('train_strong_loss', strong_loss.item(), self.forward_count)
+#         self.logger.scalar_summary('train_weak_loss', weak_loss.item(), self.forward_count)
+
+        self.forward_count += 1
+        if self.forward_count % log_interbal == 0:
+#             self.logger.scalar_summary('train_strong_loss', self.strong_losses.avg, self.forward_count)
+            self.logger.scalar_summary('train_weak_loss', self.weak_losses.avg, self.forward_count)
+            
+            logging.info('After {} iteration'.format(self.forward_count))
+#             logging.info('\t Ave. strong loss: {}'.format(self.strong_losses.avg))
+            logging.info('\t Ave. weak loss: {}'.format(self.weak_losses.avg))
+            
+            
+#             log_scalar(self.writer, 'train_strong_loss', self.strong_losses.avg, self.forward_count)
+            log_scalar(self.writer, 'train_weak_loss', self.weak_losses.avg, self.forward_count)
+            
+#             self.strong_losses.reset()
+            self.weak_losses.reset()
+        if self.forward_count % self.accum_grad != 0:
+            return
+        # self.forward_count = 0
+        # compute the gradient norm to check if it is normal or not
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(), self.grad_clip_threshold)
+        # logging.info('grad norm={}'.format(grad_norm))
+        if math.isnan(grad_norm):
+            logging.warning('grad norm is nan. Do not update model.')
+        else:
+            self.optimizer.step()
+        self.optimizer.zero_grad()
+
 
     def train_one_step_ema(self, log_interbal=100, warm_start=True):
         self.model.train()
@@ -326,7 +541,7 @@ class TransformerSolver(object):
                 logging.info('After {} iteration'.format(self.forward_count))
                 logging.info('\tstrong loss: {}'.format(strong_class_loss.item()))
                 logging.info('\tweak loss: {}'.format(weak_class_loss.item()))
-        if self.forward_count % self.accum_grad == 0:
+        if self.forward_count % self.accum_grad != 0:
             return
         # self.forward_count = 0
         # compute the gradient norm to check if it is normal or not
@@ -349,19 +564,27 @@ class TransformerSolver(object):
 
 
     def get_predictions(self, data_loader, decoder, threshold=0.5, binarization_type='global_threshold',
-                              post_processing=None, save_predictions=None, mode='validation'):
+                        post_processing=None, save_predictions=None, mode='validation',
+                        logger=None, pooling_time_ratio=1., sample_rate=22050, hop_length=365):
+        
         prediction_df = pd.DataFrame()
 
         avg_strong_loss = 0
         avg_weak_loss = 0
 
+        # Flame level 
+        frame_measure = [ConfMat() for i in range(len(CLASSES))]
+        tag_measure = ConfMat()
         self.model.eval()
         with torch.no_grad():
-            for batch_idx, (batch_input, batch_target, data_ids) in enumerate(data_loader):
+            for batch_idx, (batch_input, batch_target, data_ids, _) in enumerate(data_loader):
+                batch_target_np = batch_target.numpy()
                 if torch.cuda.is_available():
                     batch_input = batch_input.cuda()
 
                 pred_strong, pred_weak = self.model(batch_input)
+#                 if self.forward_count > 5000:
+#                     ipdb.set_trace()
 
                 if mode == 'validation':
                     class_criterion = torch.nn.BCELoss().cuda()
@@ -382,33 +605,80 @@ class TransformerSolver(object):
                 else:
                     pred_strong = ProbabilityEncoder().binarization(pred_strong, binarization_type=binarization_type,
                                                                     threshold=threshold)
+                    pred_weak = ProbabilityEncoder().binarization(pred_weak, binarization_type=binarization_type,
+                                                                    threshold=threshold)
 
                 if post_processing is not None:
                     for i in range(pred_strong.shape[0]):
                         for post_process_fn in post_processing:
                             pred_strong[i] = post_process_fn(pred_strong[i])
+                            
+                for i in range(len(pred_strong)):
+                    tn, fp, fn, tp = confusion_matrix(batch_target_np[i].max(axis=0), pred_weak[i], labels=[0,1]).ravel()
+                    tag_measure.add_cf(tn, fp, fn, tp)
+                    for j in range(len(CLASSES)):
+#                         import ipdb
+#                         ipdb.set_trace()
+                        tn, fp, fn, tp = confusion_matrix(batch_target_np[i][:, j], pred_strong[i][:, j], labels=[0,1]).ravel()
+                        frame_measure[j].add_cf(tn, fp, fn, tp)
 
                 for pred, data_id in zip(pred_strong, data_ids):
                     pred = decoder(pred)
                     pred = pd.DataFrame(pred, columns=["event_label", "onset", "offset"])
                     pred["filename"] = re.sub('^.*?-', '', data_id + '.wav')
                     prediction_df = prediction_df.append(pred)
+                    
+        # In seconds
+        prediction_df.onset = prediction_df.onset * pooling_time_ratio / (sample_rate / hop_length)
+        prediction_df.offset = prediction_df.offset * pooling_time_ratio / (sample_rate / hop_length)
+        
+        # Compute frame level macro f1 score
+        ave_precision = 0
+        ave_recall = 0
+        macro_f1 = 0
+        for i in range(len(CLASSES)):
+            ave_precision_, ave_recall_, macro_f1_ = frame_measure[i].calc_f1()
+            ave_precision += ave_precision_
+            ave_recall += ave_recall_
+            macro_f1 += macro_f1_
+        ave_precision /= len(CLASSES)
+        ave_recall /= len(CLASSES)
+        macro_f1 /= len(CLASSES)
 
         if save_predictions is not None:
             logging.info("Saving predictions at: {}".format(save_predictions))
             prediction_df.to_csv(save_predictions, index=False, sep="\t")
 
+        weak_f1 = tag_measure.calc_f1()[2]    
         if mode == 'validation':
             logging.info(f'\tAve. valid strong class loss: {avg_strong_loss}')
             logging.info(f'\tAve. valid weak class loss: {avg_weak_loss}')
+            logging.info(f'\tAve. frame level precision: {ave_precision}')
+            logging.info(f'\tAve. frame level recall: {ave_recall}')
+            logging.info(f'\tAve. frame level macro f1: {macro_f1}')
+            logging.info(f'\tAve. weak f1: {weak_f1}')
             self.logger.scalar_summary('valid_strong_loss', avg_strong_loss, self.forward_count)
             self.logger.scalar_summary('valid_weak_loss', avg_weak_loss, self.forward_count)
+            self.logger.scalar_summary('frame_level_precision', ave_precision, self.forward_count)
+            self.logger.scalar_summary('frame_level_recall', ave_recall, self.forward_count)
+            self.logger.scalar_summary('frame_level_macro_f1', macro_f1, self.forward_count)
+            self.logger.scalar_summary('weak_f1', weak_f1, self.forward_count)
+            log_scalar(self.writer, 'valid_strong_loss', avg_strong_loss, self.forward_count)
+            log_scalar(self.writer, 'valid_weak_loss', avg_weak_loss, self.forward_count)
+            log_scalar(self.writer, 'frame_level_precision', ave_precision, self.forward_count)
+            log_scalar(self.writer, 'frame_level_recall', ave_recall, self.forward_count)
+            log_scalar(self.writer, 'frame_level_macro_f1', macro_f1, self.forward_count)
+            log_scalar(self.writer, 'weak_f1', weak_f1, self.forward_count)
 
-        return prediction_df
+        return prediction_df, ave_precision, ave_recall, macro_f1, weak_f1
 
     def save(self, filename, ema_filename):
-        self.model.save(filename)
-        self.ema_model.save(ema_filename)
+        torch.save(self.model.state_dict(), filename)
+        torch.save(self.ema_model.state_dict(), ema_filename)
+        
+    def load(self, filename, ema_filename):
+        self.model.load_state_dict(torch.load(filename))
+        self.ema_model.load_state_dict(torch.load(ema_filename))
 
 #
 # class MeanTeacherTrainer():

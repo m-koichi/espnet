@@ -19,13 +19,14 @@ import config as cfg
 from transforms import Normalize, FrequencyMask, ApplyLog
 import functools
 import ipdb
+from my_utils import get_batch_predictions
 
 LABELS = ['Alarm_bell_ringing', 'Blender', 'Cat', 'Dishes', 'Dog',
           'Electric_shaver_toothbrush', 'Frying', 'Running_water', 'Speech', 'Vacuum_cleaner']
 
 
 def search_best_threshold(model, valid_loader, validation_df, many_hot_encoder, step,
-                          sample_rate, hop_length):
+                          pooling_time_ratio, sample_rate, hop_length):
     # Event = namedtuple('Event', ('thres', 'f1'))
     best_th = {k: 0 for k in LABELS}
     best_f1 = {k: 0 for k in LABELS}
@@ -33,9 +34,12 @@ def search_best_threshold(model, valid_loader, validation_df, many_hot_encoder, 
     model.eval()
     for th in np.arange(step, 1, step):
         print('th:', th)
-        predictions = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong, post_processing=None,
-                                            threshold=th)
-        valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=1,
+        predictions, _, _ , _, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+                                                        post_processing=None, save_predictions=None,
+                                                        pooling_time_ratio=pooling_time_ratio,
+                                                        threshold=th, sample_rate=sample_rate,
+                                                        hop_length=hop_length)
+        valid_events_metric, valid_segments_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
                                                      sample_rate=sample_rate, hop_length=hop_length)
         for label in LABELS:
             f1 = valid_events_metric.class_wise_f_measure(event_label=label)['f_measure']
@@ -47,9 +51,13 @@ def search_best_threshold(model, valid_loader, validation_df, many_hot_encoder, 
     for i, label in enumerate(LABELS):
         thres_list[i] = best_th[label]
 
-    predictions = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong, post_processing=None,
-                                        threshold=thres_list, binarization_type='class_threshold')
-    valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=1,
+    predictions, _, _ , _, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong, post_processing=None,
+                                        threshold=thres_list, binarization_type='class_threshold',
+                                        pooling_time_ratio=pooling_time_ratio,
+                                        sample_rate=sample_rate,
+                                        hop_length=hop_length
+                                       )
+    valid_events_metric, valid_segments_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
                                                  sample_rate=sample_rate, hop_length=hop_length)
     # predictions = get_batch_predictions_tta(model, valid_loader, many_hot_encoder.decode_strong)
     # valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=1)
@@ -127,76 +135,76 @@ def get_batch_predictions_tta(model, data_loader, decoder, post_processing=False
     return prediction_df
 
 
-def get_batch_predictions(model, data_loader, decoder, threshold=0.5, binarization_type='global_threshold',
-                          post_processing=None, save_predictions=None,
-                          pooling_time_ratio=1., sample_rate=22050, hop_length=365):
-    prediction_df = pd.DataFrame()
+# def get_batch_predictions(model, data_loader, decoder, threshold=0.5, binarization_type='global_threshold',
+#                           post_processing=None, save_predictions=None,
+#                           pooling_time_ratio=1., sample_rate=22050, hop_length=365):
+#     prediction_df = pd.DataFrame()
 
-    # validation = {}
-    # predictions = {}
-    # target = {}
+#     # validation = {}
+#     # predictions = {}
+#     # target = {}
 
-    for batch_idx, (batch_input, batch_target, data_ids) in enumerate(data_loader):
-        if torch.cuda.is_available():
-            batch_input = batch_input.cuda()
+#     for batch_idx, (batch_input, batch_target, data_ids) in enumerate(data_loader):
+#         if torch.cuda.is_available():
+#             batch_input = batch_input.cuda()
 
-        pred_strong, _ = model(batch_input)
-        pred_strong = pred_strong.cpu().data.numpy()
+#         pred_strong, _ = model(batch_input)
+#         pred_strong = pred_strong.cpu().data.numpy()
 
-        batch_target = batch_target.numpy()
-        #
-        # for i in range(pred_strong.shape[0]):
-        #     predictions[data_ids[i]] = pred_strong[i]
-        #     target[data_ids[i]] = batch_target[i]
-        # # import ipdb
-        # ipdb.set_trace()
+#         batch_target = batch_target.numpy()
+#         #
+#         # for i in range(pred_strong.shape[0]):
+#         #     predictions[data_ids[i]] = pred_strong[i]
+#         #     target[data_ids[i]] = batch_target[i]
+#         # # import ipdb
+#         # ipdb.set_trace()
 
-        # TODO: 全部推論してからパラメータ探索する
+#         # TODO: 全部推論してからパラメータ探索する
 
-        if binarization_type == 'class_threshold':
-            for i in range(pred_strong.shape[0]):
-                pred_strong[i] = ProbabilityEncoder().binarization(pred_strong[i], binarization_type=binarization_type,
-                                                                   threshold=threshold, time_axis=0)
-        else:
-            pred_strong = ProbabilityEncoder().binarization(pred_strong, binarization_type=binarization_type,
-                                                            threshold=threshold)
+#         if binarization_type == 'class_threshold':
+#             for i in range(pred_strong.shape[0]):
+#                 pred_strong[i] = ProbabilityEncoder().binarization(pred_strong[i], binarization_type=binarization_type,
+#                                                                    threshold=threshold, time_axis=0)
+#         else:
+#             pred_strong = ProbabilityEncoder().binarization(pred_strong, binarization_type=binarization_type,
+#                                                             threshold=threshold)
 
-        # ipdb.set_trace()
-        if post_processing is not None:
-            for i in range(pred_strong.shape[0]):
-                for post_process_fn in post_processing:
-                    # ipdb.set_trace()
-                    pred_strong[i] = post_process_fn(pred_strong[i])
+#         # ipdb.set_trace()
+#         if post_processing is not None:
+#             for i in range(pred_strong.shape[0]):
+#                 for post_process_fn in post_processing:
+#                     # ipdb.set_trace()
+#                     pred_strong[i] = post_process_fn(pred_strong[i])
 
-        for pred, data_id in zip(pred_strong, data_ids):
-            # pred = post_processing(pred)
-            pred = decoder(pred)
-            pred = pd.DataFrame(pred, columns=["event_label", "onset", "offset"])
-            pred["filename"] = re.sub('^.*?-', '', data_id + '.wav')
-            prediction_df = prediction_df.append(pred)
+#         for pred, data_id in zip(pred_strong, data_ids):
+#             # pred = post_processing(pred)
+#             pred = decoder(pred)
+#             pred = pd.DataFrame(pred, columns=["event_label", "onset", "offset"])
+#             pred["filename"] = re.sub('^.*?-', '', data_id + '.wav')
+#             prediction_df = prediction_df.append(pred)
 
-            # if batch_idx == 0:
-            #     LOG.debug("predictions: \n{}".format(pred))
-            #     LOG.debug("predictions strong: \n{}".format(pred_strong))
-            #     prediction_df = pred.copy()
-            # else:
-    # pdb.set_trace()
-    # validation['prediction'] = predictions
-    # validation['target'] = target
-    # ipdb.set_trace()
-    #
-    # with open('weak_result.pkl', 'wb') as f:
-    #     pickle.dump(validation, f)
-    # ipdb.set_trace()
+#             # if batch_idx == 0:
+#             #     LOG.debug("predictions: \n{}".format(pred))
+#             #     LOG.debug("predictions strong: \n{}".format(pred_strong))
+#             #     prediction_df = pred.copy()
+#             # else:
+#     # pdb.set_trace()
+#     # validation['prediction'] = predictions
+#     # validation['target'] = target
+#     # ipdb.set_trace()
+#     #
+#     # with open('weak_result.pkl', 'wb') as f:
+#     #     pickle.dump(validation, f)
+#     # ipdb.set_trace()
 
-    # In seconds
-    prediction_df.onset = prediction_df.onset * pooling_time_ratio / (sample_rate / hop_length)
-    prediction_df.offset = prediction_df.offset * pooling_time_ratio / (sample_rate / hop_length)
+#     # In seconds
+#     prediction_df.onset = prediction_df.onset * pooling_time_ratio / (sample_rate / hop_length)
+#     prediction_df.offset = prediction_df.offset * pooling_time_ratio / (sample_rate / hop_length)
 
-    if save_predictions is not None:
-        LOG.info("Saving predictions at: {}".format(save_predictions))
-        prediction_df.to_csv(save_predictions, index=False, sep="\t")
-    return prediction_df
+#     if save_predictions is not None:
+#         LOG.info("Saving predictions at: {}".format(save_predictions))
+#         prediction_df.to_csv(save_predictions, index=False, sep="\t")
+#     return prediction_df
 
 
 # def compute_strong_metrics(predictions, data_loader):
@@ -292,9 +300,8 @@ def remove_short_duration(event_roll, reject_duration=10):
 
     return event_roll
 
-
 def search_best_median(model, valid_loader, validation_df, many_hot_encoder, spans,
-                       sample_rate=16000, hop_length=320):
+                       pooling_time_ratio, sample_rate, hop_length):
     # Event = namedtuple('Event', ('thres', 'f1'))
     best_span = {k: 1 for k in LABELS}
     best_f1 = {k: 0 for k in LABELS}
@@ -303,9 +310,12 @@ def search_best_median(model, valid_loader, validation_df, many_hot_encoder, spa
     for span in spans:
         print('span:', span)
         post_process_fn = [functools.partial(median_filt_1d, filt_span=span)]
-        predictions = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
-                                            post_processing=post_process_fn)
-        valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=1,
+        predictions, _, _, _, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+                                                        post_processing=post_process_fn, save_predictions=None,
+                                                        pooling_time_ratio=pooling_time_ratio,
+                                                        sample_rate=sample_rate,
+                                                        hop_length=hop_length)
+        valid_events_metric, valid_segments_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
                                                      sample_rate=sample_rate, hop_length=hop_length)
         for label in LABELS:
             f1 = valid_events_metric.class_wise_f_measure(event_label=label)['f_measure']
@@ -315,9 +325,12 @@ def search_best_median(model, valid_loader, validation_df, many_hot_encoder, spa
 
     # ipdb.set_trace()
     post_process_fn = [functools.partial(median_filt_1d, filt_span=list(best_span.values()))]
-    predictions = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
-                                        post_processing=post_process_fn)
-    valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=1,
+    predictions, _, _, _, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+                                        post_processing=post_process_fn,
+                                        pooling_time_ratio=pooling_time_ratio,
+                                        sample_rate=sample_rate,
+                                        hop_length=hop_length)
+    valid_events_metric, valid_segments_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
                                                  sample_rate=sample_rate, hop_length=hop_length)
 
     print('best_span:', best_span)
@@ -326,7 +339,7 @@ def search_best_median(model, valid_loader, validation_df, many_hot_encoder, spa
 
 
 def search_best_accept_gap(model, valid_loader, validation_df, many_hot_encoder, gaps,
-                           sample_rate=16000, hop_length=320):
+                           pooling_time_ratio, sample_rate, hop_length):
     # Event = namedtuple('Event', ('thres', 'f1'))
     best_gap = {k: 1 for k in LABELS}
     best_f1 = {k: 0 for k in LABELS}
@@ -335,10 +348,16 @@ def search_best_accept_gap(model, valid_loader, validation_df, many_hot_encoder,
     for gap in gaps:
         print('gap:', gap)
         post_process_fn = [functools.partial(fill_up_gap, accept_gap=gap)]
-        predictions = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
-                                            post_processing=post_process_fn)
-        valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=1,
+        
+        
+        predictions, _, _, _, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+                                                        post_processing=post_process_fn, save_predictions=None,
+                                                        pooling_time_ratio=pooling_time_ratio,
+                                                        sample_rate=sample_rate,
+                                                        hop_length=hop_length)
+        valid_events_metric, valid_segments_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
                                                      sample_rate=sample_rate, hop_length=hop_length)
+        
         for label in LABELS:
             f1 = valid_events_metric.class_wise_f_measure(event_label=label)['f_measure']
             if f1 > best_f1[label]:
@@ -346,9 +365,12 @@ def search_best_accept_gap(model, valid_loader, validation_df, many_hot_encoder,
                 best_f1[label] = f1
 
     post_process_fn = [functools.partial(fill_up_gap, accept_gap=list(best_gap.values()))]
-    predictions = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
-                                        post_processing=post_process_fn)
-    valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=1,
+    predictions, _, _, _, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+                                        post_processing=post_process_fn,
+                                        pooling_time_ratio=pooling_time_ratio,
+                                        sample_rate=sample_rate,
+                                        hop_length=hop_length)
+    valid_events_metric, valid_segments_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
                                                  sample_rate=sample_rate, hop_length=hop_length)
 
     print('best_gap:', best_gap)
@@ -357,7 +379,7 @@ def search_best_accept_gap(model, valid_loader, validation_df, many_hot_encoder,
 
 
 def search_best_remove_short_duration(model, valid_loader, validation_df, many_hot_encoder, durations,
-                                      sample_rate=16000, hop_length=320):
+                                      pooling_time_ratio, sample_rate, hop_length):
     # Event = namedtuple('Event', ('thres', 'f1'))
     best_duration = {k: 1 for k in LABELS}
     best_f1 = {k: 0 for k in LABELS}
@@ -366,9 +388,12 @@ def search_best_remove_short_duration(model, valid_loader, validation_df, many_h
     for duration in durations:
         print('duration:', duration)
         post_process_fn = [functools.partial(remove_short_duration, reject_duration=duration)]
-        predictions = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
-                                            post_processing=post_process_fn)
-        valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=1,
+        predictions, _, _, _, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+                                                        post_processing=post_process_fn, save_predictions=None,
+                                                        pooling_time_ratio=pooling_time_ratio,
+                                                        sample_rate=sample_rate,
+                                                        hop_length=hop_length)
+        valid_events_metric, valid_segments_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
                                                      sample_rate=sample_rate, hop_length=hop_length)
         for label in LABELS:
             f1 = valid_events_metric.class_wise_f_measure(event_label=label)['f_measure']
@@ -377,10 +402,12 @@ def search_best_remove_short_duration(model, valid_loader, validation_df, many_h
                 best_f1[label] = f1
 
     post_process_fn = [functools.partial(remove_short_duration, reject_duration=list(best_duration.values()))]
-    predictions = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
-                                        post_processing=post_process_fn)
-
-    valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=1,
+    predictions, _, _, _, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+                                        post_processing=post_process_fn,
+                                        pooling_time_ratio=pooling_time_ratio,
+                                        sample_rate=sample_rate,
+                                        hop_length=hop_length)
+    valid_events_metric, valid_segments_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
                                                  sample_rate=sample_rate, hop_length=hop_length)
 
     print('best_duration:', best_duration)
@@ -388,8 +415,8 @@ def search_best_remove_short_duration(model, valid_loader, validation_df, many_h
     return best_duration, best_f1
 
 
-def show_best(model, valid_loader, many_hot_encoder, pp_params,
-              sample_rate=16000, hop_length=320):
+def show_best(model, valid_loader, validation_df, many_hot_encoder, pp_params,
+              pooling_time_ratio, sample_rate, hop_length):
     best_th = list(pp_params[0].values())
     best_fs = list(pp_params[1].values())
     best_ag = list(pp_params[2].values())
@@ -397,10 +424,13 @@ def show_best(model, valid_loader, many_hot_encoder, pp_params,
     post_processing_fn = [functools.partial(median_filt_1d, filt_span=list(best_fs)),
                           functools.partial(fill_up_gap, accept_gap=list(best_ag)),
                           functools.partial(remove_short_duration, reject_duration=list(best_rd))]
-    predictions = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+    predictions, _, _, _, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
                                         post_processing=post_processing_fn,
-                                        threshold=best_th, binarization_type='class_threshold')
-    valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=1,
+                                        threshold=best_th, binarization_type='class_threshold',
+                                        pooling_time_ratio=pooling_time_ratio,
+                                        sample_rate=sample_rate,
+                                        hop_length=hop_length)
+    valid_events_metric, valid_segments_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
                                                  sample_rate=sample_rate, hop_length=hop_length)
 
 
@@ -514,7 +544,7 @@ def test_komatsu(sample, validation_df, decoder):
     #     LOG.info("Saving predictions at: {}".format(save_predictions))
 
     prediction_df.to_csv('result_komatsu.csv', index=False, sep="\t")
-    valid_events_metric = compute_strong_metrics(prediction_df, validation_df, pooling_time_ratio=1,
+    valid_events_metric = compute_strong_metrics(prediction_df, validation_df, pooling_time_ratio=None,
                                                  sample_rate=16000, hop_length=320)
     ipdb.set_trace()
     return prediction_df
@@ -579,7 +609,7 @@ if __name__ == '__main__':
     valid_json = f'./data/validation_44k_mel64/data_validation.json'
     # valid_json = f'./data/train_16k_mel64/data_weak.json'
     # pooling_time_ratio = config['pooling_time_ratio']
-    pooling_time_ratio = 1
+    pooling_time_ratio = None
 
     print(valid_json)
     with open(valid_json, 'rb') as valid_json:

@@ -90,3 +90,15 @@ class CNN(nn.Module):
         # conv features
         x = self.cnn(x)
         return x
+    
+    
+class BidirectionalGRU(nn.Module):
+
+    def __init__(self, n_in, n_hidden, dropout=0, num_layers=1):
+        super(BidirectionalGRU, self).__init__()
+
+        self.rnn = nn.GRU(n_in, n_hidden, bidirectional=True, dropout=dropout, batch_first=True, num_layers=num_layers)
+
+    def forward(self, input_feat):
+        recurrent, _ = self.rnn(input_feat)
+        return recurrent

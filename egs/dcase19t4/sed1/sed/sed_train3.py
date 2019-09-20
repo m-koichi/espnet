@@ -28,12 +28,10 @@ from models.RNN import BidirectionalGRU
 import config as cfg
 from models.CRNN import CRNN
 from utils.utils import AverageMeterSet, weights_init, ManyHotEncoder, SaveBest
-from evaluation_measures import compute_strong_metrics
+from evaluation_measures import compute_strong_metrics, segment_based_evaluation_df
 
-import pdb
-
-from dataset import SEDDataset
-from transforms import Normalize, ApplyLog, GaussianNoise, TimeWarp, FrequencyMask, TimeMask
+from dataset import SEDDatasetTrans as SEDDataset
+from transforms import Normalize, ApplyLog, GaussianNoise, TimeWarp, FrequencyMask, TimeMask, Gain, SpecAugment
 from solver.mcd import MCDSolver
 # from solver.CNN import CNN
 # from solver.RNN import RNN
@@ -63,36 +61,132 @@ from model_tuning import search_best_threshold, search_best_median, search_best_
 
 
 import mlflow
+import pickle
+import tempfile
+from tensorboardX import SummaryWriter
+from tqdm import tqdm
+
+from CB_loss import CB_loss
+from sklearn.utils.class_weight import compute_class_weight
+
+
+
+best_event_iter = 0
+best_event_f1 = 0
+
+weak_samples_list = [192, 125, 164, 177, 208, 97, 165, 322, 522, 162]
+strong_samples_list = [40092, 69093, 28950, 23370, 25153, 51504, 34489, 30453, 122494, 53418]
+
+def get_sample_rate_and_hop_length(args):
+    if args.n_frames == 864:
+        sample_rate = 44100
+        hop_length = 511
+    elif args.n_frames == 605:
+        sample_rate = 22050
+        hop_length = 365
+    elif args.n_frames == 501:
+        sample_rate = 16000
+        hop_length = 320
+    elif args.n_frames == 496:
+        sample_rate = 16000
+        hop_length = 323
+    else:
+        raise ValueError
+    
+    return sample_rate, hop_length
+
+
+def get_scaling_factor(datasets, save_pickle_path):
+    """Get scaling factor on mel spectrogram for each bins
+    Args:
+        dataset:
+        save_path:
+    Return:
+        mean: (np.ndarray) scaling factor
+        std: (np.ndarray) scaling factor
+    """
+    scaling_factor = {}
+    for dataset in datasets:
+        dataloader = DataLoader(dataset, batch_size=1)
+
+        for x, _, _ in dataloader:
+            if len(scaling_factor) == 0:
+                scaling_factor["mean"] = np.zeros(x.size(-1))
+                scaling_factor["std"] = np.zeros(x.size(-1))
+            scaling_factor["mean"] += x.numpy()[0,0,:,:].mean(axis=0)
+            scaling_factor["std"] += x.numpy()[0,0,:,:].std(axis=0)
+        scaling_factor["mean"] /= len(dataset)
+        scaling_factor["std"] /= len(dataset)
+
+    with open(save_pickle_path, 'wb') as f:
+        pickle.dump(scaling_factor, f)
+
+    return scaling_factor
+
+
 
 def train(solver, validation_loader, validation_df, decoder, args, exp_name, iteration=1000, log_interval=100,
-          save_best_eb=None):
-    for i in range(1, iteration + 1):
-        # ipdb.set_trace()
+          save_best_eb=None, train_loader=None, train_df=None, mode='SED'):
+    for i in tqdm(range(1, iteration + 1)):
 
         best_f1 = 0
         best_iterations = 0
-        solver.train_one_step_ema(warm_start=args.warm_start)
+        if mode == 'SED':
+            solver.train_one_step(warm_start=args.warm_start)
+        elif mode =='AT':
+            solver.train_one_step_at(warm_start=args.warm_start)
         if i % log_interval == 0 and i >= args.transformer_warmup_steps:
-            sample_rate = 44100 if args.n_frames == 864 else 16000
-            hop_length = 511 if args.n_frames == 864 else 320
+            
+            sample_rate, hop_length = get_sample_rate_and_hop_length(args)
+            
             # solver.eval()
-            predictions = solver.get_predictions(validation_loader, decoder,
+#             print('============= For Debug, closed test =============')
+#             train_predictions = solver.get_predictions(train_loader, decoder,
+#                                                  save_predictions=None,
+#                                                  pooling_time_ratio=args.pooling_time_ratio,
+#                                                  sample_rate=sample_rate, hop_length=hop_length)
+#             train_events_metric = compute_strong_metrics(train_predictions, train_df, pooling_time_ratio=None,
+#                                                          sample_rate=sample_rate, hop_length=hop_length)
+            
+            
+            print(f'============= After training {i} iterations =============')
+            predictions, ave_precision, ave_recall, macro_f1, weak_f1 = solver.get_predictions(validation_loader, decoder,
                                                  save_predictions=os.path.join(exp_name, 'predictions',
-                                                                               f'iteration_{i}.csv'))
-            valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=args.pooling_time_ratio,
+                                                                               f'iteration_{i}.csv'),
+                                                 pooling_time_ratio=args.pooling_time_ratio,
+                                                 sample_rate=sample_rate, hop_length=hop_length)
+            valid_events_metric, valid_segments_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
                                                          sample_rate=sample_rate, hop_length=hop_length)
-            # valid_segments_metric = segment_based_evaluation_df(validation_df, predictions,
-            #                                                     time_resolution=float(args.pooling_time_ratio))
+#             valid_segments_metric = segment_based_evaluation_df(validation_df, predictions,
+#                                                                 time_resolution=1.)
             solver.save(os.path.join(exp_name, 'model', f'iteration_{i}.pth'),
                         os.path.join(exp_name, 'model', f'ema_iteration_{i}.pth'))
 
             global_valid = valid_events_metric.results_class_wise_average_metrics()['f_measure']['f_measure']
+            segment_valid = valid_segments_metric.results_class_wise_average_metrics()['f_measure']['f_measure']
+
+            # save to log text
+            with open(os.path.join(exp_name, 'log', f'result_{i}th_iterations.txt'), 'w') as f:
+                f.write(f"Event-based macro-f1: {global_valid * 100:.4}\n")
+                f.write(f"Segment-based macro-f1: {segment_valid * 100:.4}\n")
+                f.write(f"Frame-based macro-f1: {macro_f1 * 100:.4}\n")
+                f.write(f"Frame-based ave_precision: {ave_precision * 100:.4}\n")
+                f.write(f"Frame-based ave_recall: {ave_recall * 100:.4}\n")
+                f.write(f"weak-f1: {weak_f1 * 100:.4}\n")
+                f.write(str(valid_events_metric))
+                f.write(str(valid_segments_metric))
 
             if save_best_eb.apply(global_valid):
                 best_iterations = i
                 best_f1 = global_valid
+                best_event_iter = i
+                best_event_f1 = global_valid
                 solver.save(os.path.join(exp_name, 'model', f'best_iteration.pth'),
                             os.path.join(exp_name, 'model', f'best_ema_iteration.pth'))
+                with open(os.path.join(exp_name, 'log', 'best_score.txt'), 'w') as f:
+                    f.write("Event-based: best macro-f1 iteration: {}\n".format(best_event_iter))
+                    f.write("Event-based: best macro-f1 score: {}\n".format(best_event_f1))
+                    
             # pdb.set_trace()
             #                             global_valid = valid_events_metric.results_class_wise_average_metrics()['f_measure']['f_measure']
             #                             # global_valid = global_valid + np.mean(weak_metric)
@@ -209,11 +303,11 @@ def main(args):
     parser.add_argument('--model', default='crnn_baseline_feature', type=str)
     parser.add_argument('--pooling-time-ratio', default=1, type=int)
     parser.add_argument('--loss-function', default='BCE', type=str,
-                        choices=['BCE', 'FocalLoss', 'Dice'],
+                        choices=['BCE', 'FocalLoss', 'Dice', 'CBLoss'],
                         help='Type of loss function')
     parser.add_argument('--noise-reduction', default=False, type=strtobool)
     parser.add_argument('--pooling-operator', default='attention', type=str,
-                        choices=['max', 'mean', 'softmax', 'auto', 'cap', 'rap', 'attention'])
+                        choices=['max', 'mean', 'softmax', 'auto', 'cap', 'rap', 'attention', 'test'])
     parser.add_argument('--train-data', default='original', type=str,
                         choices=['original', 'noise_reduction', 'both'],
                         help='training data')
@@ -250,10 +344,15 @@ def main(args):
     parser.add_argument('--elayers', default=6, type=int)
     parser.add_argument('--eunits', default=1024, type=int)
     parser.add_argument('--accum-grad', default=2, type=int)
+    parser.add_argument('--classifier', default='linear', type=str)
+    parser.add_argument('--run-name', required=True, type=str,
+                        help='exp_name for mlflow')
+    # Decoder
+    parser.add_argument('--after-conv', default=False, type= strtobool,
+                        help='insert conv layer after each encoder block')
+    
 
     args = parser.parse_args(args)
-    
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
 
     if args.input_layer_type == 1:
         args.transformer_input_layer = 'linear'
@@ -261,11 +360,13 @@ def main(args):
         args.transformer_input_layer = 'conv2d'
     elif args.input_layer_type == 3:
         args.transformer_input_layer = 'linear'
-        args.batch_size //= 2
+    elif args.input_layer_type == 4:
+        args.transformer_input_layer = 'linear'
     else:
         raise ValueError
 
-    exp_name = f'exp2/{datetime.now().strftime("%Y_%m%d")}_{args.model}_rir{args.use_rir_augmentation}_fm{args.use_specaugment}' \
+    os.makedirs(os.path.join('exp3', args.run_name), exist_ok=True)
+    exp_name = f'exp3/{args.run_name}/{datetime.now().strftime("%Y_%m%d")}_{args.model}_fm{args.use_specaugment}' \
                f'_pp{args.use_post_processing}_an{args.add_noise}_iter{args.iterations}' \
                f'_ptr{args.pooling_time_ratio}_loss{args.loss_function}' \
                f'_po-{args.pooling_operator}' \
@@ -273,27 +374,21 @@ def main(args):
                f'_logmel{args.log_mels}_tinit-{args.transformer_init}_tinput-{args.transformer_input_layer}' \
                f'_tdo{args.transformer_attn_dropout_rate}_tlr{args.transformer_lr}_twu{args.transformer_warmup_steps}' \
                f'_adim{args.adim}_aheads{args.aheads}_elayers{args.elayers}_eunits{args.eunits}_ag{args.accum_grad}' \
-               f'_ilt{args.input_layer_type}'
-
+               f'_ilt{args.input_layer_type}_cls{args.classifier}'
+    exp_name = f'exp3/{args.run_name}'
     os.makedirs(os.path.join(exp_name, 'model'), exist_ok=True)
     os.makedirs(os.path.join(exp_name, 'predictions'), exist_ok=True)
     os.makedirs(os.path.join(exp_name, 'log'), exist_ok=True)
 
     # logger = Logger(os.path.join(exp_name, 'log'))
 
-    sr = '_16k' if args.n_frames == 500 else '_44k'
+    sr = '_16k' if args.n_frames == 496 else '_44k'
     mels = '_mel64' if args.mels == 64 else '_mel128'
-    rir = '_rir' if args.use_rir_augmentation else ''
 
-    train_synth_json = f'./data/train{rir}{sr}{mels}/data_synthetic.json'
-    train_weak_json = f'./data/train{rir}{sr}{mels}/data_weak.json'
-    train_unlabel_json = f'./data/train{rir}{sr}{mels}/data_unlabel_in_domain.json'
+    train_synth_json = f'./data/train{sr}{mels}/data_synthetic.json'
+    train_weak_json = f'./data/train{sr}{mels}/data_weak.json'
+    train_unlabel_json = f'./data/train{sr}{mels}/data_unlabel_in_domain.json'
     valid_json = f'./data/validation{sr}{mels}/data_validation.json'
-
-    train_nr_synth_json = f'./data/train{sr}{mels}/data_synthetic.json'
-    train_nr_weak_json = f'./data/train{sr}{mels}/data_weak.json'
-    train_nr_unlabel_json = f'./data/train{sr}{mels}/data_unlabel_in_domain.json'
-    valid_nr_json = f'./data/validation{sr}{mels}/data_validation.json'
 
     synth_df = pd.read_csv(args.synth_meta, header=0, sep="\t")
     validation_df = pd.read_csv(args.valid_meta, header=0, sep="\t")
@@ -301,125 +396,100 @@ def main(args):
     with open(train_synth_json, 'rb') as train_synth_json, \
             open(train_weak_json, 'rb') as train_weak_json, \
             open(train_unlabel_json, 'rb') as train_unlabel_json, \
-            open(valid_json, 'rb') as valid_json, \
-            open(train_nr_synth_json, 'rb') as train_nr_synth_json, \
-            open(train_nr_weak_json, 'rb') as train_nr_weak_json, \
-            open(train_nr_unlabel_json, 'rb') as train_nr_unlabel_json, \
-            open(valid_nr_json, 'rb') as valid_nr_json:
+            open(valid_json, 'rb') as valid_json:
 
         train_synth_json = json.load(train_synth_json)['utts']
         train_weak_json = json.load(train_weak_json)['utts']
         train_unlabel_json = json.load(train_unlabel_json)['utts']
         valid_json = json.load(valid_json)['utts']
 
-        train_nr_synth_json = json.load(train_nr_synth_json)['utts']
-        train_nr_weak_json = json.load(train_nr_weak_json)['utts']
-        train_nr_unlabel_json = json.load(train_nr_unlabel_json)['utts']
-        valid_nr_json = json.load(valid_nr_json)['utts']
+#     train_transforms = []
+#     test_transforms = []
+#     if args.log_mels:
+#         train_transforms.append(ApplyLog())
+#         test_transforms.append(ApplyLog())
+#     train_transforms.append(Normalize())
+#     test_transforms.append(Normalize())
+#     if args.add_noise:
+#         train_transforms.append(GaussianNoise())
+#         test_transforms.append(GaussianNoise())
+#     if args.use_specaugment:
+#         train_transforms.append(FrequencyMask())
+#         test_transforms.append(FrequencyMask())
+# transform functions for data loader
 
-    train_transforms = []
-    test_transforms = []
-    if args.log_mels:
-        train_transforms.append(ApplyLog())
-        test_transforms.append(ApplyLog())
-    train_transforms.append(Normalize())
-    test_transforms.append(Normalize())
-    if args.add_noise:
-        train_transforms.append(GaussianNoise())
-        test_transforms.append(GaussianNoise())
-    if args.use_specaugment:
-        train_transforms.append(FrequencyMask())
-        test_transforms.append(FrequencyMask())
 
-    if args.train_data == 'original':
+    if os.path.exists(f"sf{sr}{mels}.pickle"):
+        with open(f"sf{sr}{mels}.pickle", "rb") as f:
+            scaling_factor = pickle.load(f)
+    else:
         train_synth_dataset = SEDDataset(train_synth_json,
                                          label_type='strong',
                                          sequence_length=args.n_frames,
-                                         transforms=train_transforms,
+                                         transforms=[ApplyLog()],
                                          pooling_time_ratio=args.pooling_time_ratio)
         train_weak_dataset = SEDDataset(train_weak_json,
                                         label_type='weak',
                                         sequence_length=args.n_frames,
-                                        transforms=train_transforms,
+                                        transforms=[ApplyLog()],
                                         pooling_time_ratio=args.pooling_time_ratio)
         train_unlabel_dataset = SEDDataset(train_unlabel_json,
                                            label_type='unlabel',
                                            sequence_length=args.n_frames,
-                                           transforms=train_transforms,
+                                           transforms=[ApplyLog()],
                                            pooling_time_ratio=args.pooling_time_ratio)
-    elif args.train_data == 'noise_reduction':
-        train_synth_dataset = SEDDataset(train_nr_synth_json,
+        scaling_factor = get_scaling_factor([train_synth_dataset,
+                                            train_weak_dataset,
+                                            train_unlabel_dataset],
+                                            f"sf{sr}{mels}.pickle")
+    scaling = Normalize(mean=scaling_factor["mean"], std=scaling_factor["std"])
+    if args.use_specaugment:
+        # train_transforms = [Normalize(), TimeWarp(), FrequencyMask(), TimeMask()]
+        if args.log_mels:
+            train_transforms = [ApplyLog(), scaling, SpecAugment()]
+            test_transforms = [ApplyLog(), scaling]
+        else:
+            train_transforms = [scaling, FrequencyMask()]
+            test_transforms = [scaling]
+    else:
+        if args.log_mels:
+            train_transforms = [ApplyLog(), scaling, Gain()]
+            test_transforms = [ApplyLog(), scaling]
+        else:
+            train_transforms = [scaling]
+            test_transforms = [scaling]
+
+#     unsupervised_transforms = [TimeShift(), FrequencyShift()]
+    train_synth_dataset = SEDDataset(train_synth_json,
                                          label_type='strong',
                                          sequence_length=args.n_frames,
                                          transforms=train_transforms,
                                          pooling_time_ratio=args.pooling_time_ratio)
-        train_weak_dataset = SEDDataset(train_nr_weak_json,
+    train_weak_dataset = SEDDataset(train_weak_json,
                                         label_type='weak',
                                         sequence_length=args.n_frames,
                                         transforms=train_transforms,
                                         pooling_time_ratio=args.pooling_time_ratio)
-        train_unlabel_dataset = SEDDataset(train_nr_unlabel_json,
+    train_unlabel_dataset = SEDDataset(train_unlabel_json,
                                            label_type='unlabel',
                                            sequence_length=args.n_frames,
                                            transforms=train_transforms,
                                            pooling_time_ratio=args.pooling_time_ratio)
-    elif args.train_data == 'both':
-        train_org_synth_dataset = SEDDataset(train_synth_json,
-                                             label_type='strong',
-                                             sequence_length=args.n_frames,
-                                             transforms=train_transforms,
-                                             pooling_time_ratio=args.pooling_time_ratio)
-        train_org_weak_dataset = SEDDataset(train_weak_json,
-                                            label_type='weak',
-                                            sequence_length=args.n_frames,
-                                            transforms=train_transforms,
-                                            pooling_time_ratio=args.pooling_time_ratio)
-        train_org_unlabel_dataset = SEDDataset(train_unlabel_json,
-                                               label_type='unlabel',
-                                               sequence_length=args.n_frames,
-                                               transforms=train_transforms,
-                                               pooling_time_ratio=args.pooling_time_ratio)
-        train_nr_synth_dataset = SEDDataset(train_nr_synth_json,
-                                            label_type='strong',
-                                            sequence_length=args.n_frames,
-                                            transforms=train_transforms,
-                                            pooling_time_ratio=args.pooling_time_ratio)
-        train_nr_weak_dataset = SEDDataset(train_nr_weak_json,
-                                           label_type='weak',
-                                           sequence_length=args.n_frames,
-                                           transforms=train_transforms,
-                                           pooling_time_ratio=args.pooling_time_ratio)
-        train_nr_unlabel_dataset = SEDDataset(train_nr_unlabel_json,
-                                              label_type='unlabel',
-                                              sequence_length=args.n_frames,
-                                              transforms=train_transforms,
-                                              pooling_time_ratio=args.pooling_time_ratio)
 
-        train_synth_dataset = ConcatDataset([train_org_synth_dataset, train_nr_synth_dataset])
-        train_weak_dataset = ConcatDataset([train_org_weak_dataset, train_nr_weak_dataset])
-        train_unlabel_dataset = ConcatDataset([train_org_unlabel_dataset, train_nr_unlabel_dataset])
-
-    if args.test_data == 'original':
-        valid_dataset = SEDDataset(valid_json,
+    valid_dataset = SEDDataset(valid_json,
                                    label_type='strong',
                                    sequence_length=args.n_frames,
                                    transforms=test_transforms,
                                    pooling_time_ratio=args.pooling_time_ratio)
-    elif args.test_data == 'noise_reduction':
-        valid_dataset = SEDDataset(valid_nr_json,
-                                   label_type='strong',
-                                   sequence_length=args.n_frames,
-                                   transforms=test_transforms,
-                                   pooling_time_ratio=args.pooling_time_ratio)
-
+        
     if args.ngpu > 1:
         args.batch_size *= args.ngpu
 
-    train_synth_loader = DataLoader(train_synth_dataset, batch_size=args.batch_size, shuffle=False, num_workers=8,
+    train_synth_loader = DataLoader(train_synth_dataset, batch_size=args.batch_size, shuffle=True, num_workers=8,
                                     drop_last=True)
-    train_weak_loader = DataLoader(train_weak_dataset, batch_size=args.batch_size, shuffle=False, num_workers=8,
+    train_weak_loader = DataLoader(train_weak_dataset, batch_size=args.batch_size, shuffle=True, num_workers=8,
                                    drop_last=True)
-    train_unlabel_loader = DataLoader(train_unlabel_dataset, batch_size=args.batch_size, shuffle=False, num_workers=8,
+    train_unlabel_loader = DataLoader(train_unlabel_dataset, batch_size=args.batch_size, shuffle=True, num_workers=8,
                                       drop_last=True)
     valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False, num_workers=8)
 
@@ -472,16 +542,23 @@ def main(args):
 
     if args.input_layer_type == 1:
         cnn_kwargs = {
-            'pooling'   : [(1, 4), (1, 4), (1, 8)],
+            'pooling'   : [(1, 4), (1, 4), (1, 4)],
             'nb_filters': [64, 64, args.mels]
         }
+        if args.pooling_time_ratio==8:
+            cnn_kwargs = {
+                'pooling'   : [(2, 4), (2, 4), (2, 4)],
+                'nb_filters': [64, 64, args.mels]
+            }
+            
         assert args.transformer_input_layer == 'linear'
         model = Transformer(input_dim=args.mels,
                             n_class=10,
                             args=args,
                             pooling=args.pooling_operator,
                             input_conv=True,
-                            cnn_kwargs=cnn_kwargs)
+                            cnn_kwargs=cnn_kwargs,
+                            classifier=args.classifier)
     elif args.input_layer_type == 2:
         assert args.transformer_input_layer == 'conv2d'
         model = Transformer(input_dim=args.mels,
@@ -497,11 +574,27 @@ def main(args):
                             args=args,
                             pooling=args.pooling_operator,
                             input_conv=False,
-                            cnn_kwargs=None)
-
+                            cnn_kwargs=None,
+                            classifier=args.classifier,
+                            pos_enc=True)
+    elif args.input_layer_type == 4:
+            assert args.transformer_input_layer == 'linear'
+            if args.pooling_time_ratio==8:
+                cnn_kwargs = {
+                    'pooling'   : [(2, 4), (2, 4), (2, 4)],
+                    'nb_filters': [64, 64, args.mels]
+                }
+            model = Transformer(input_dim=args.mels,
+                                n_class=10,
+                                args=args,
+                                pooling=args.pooling_operator,
+                                input_conv=True,
+                                cnn_kwargs=cnn_kwargs,
+                                classifier=args.classifier)
+            
     if args.input_layer_type == 1:
         cnn_kwargs = {
-            'pooling'   : [(1, 4), (1, 4), (1, 8)],
+            'pooling'   : [(2, 4), (2, 4), (2, 8)],
             'nb_filters': [64, 64, args.mels]
         }
         assert args.transformer_input_layer == 'linear'
@@ -510,7 +603,8 @@ def main(args):
                                 args=args,
                                 pooling=args.pooling_operator,
                                 input_conv=True,
-                                cnn_kwargs=cnn_kwargs)
+                                cnn_kwargs=cnn_kwargs,
+                                pos_enc=False)
     elif args.input_layer_type == 2:
         assert args.transformer_input_layer == 'conv2d'
         ema_model = Transformer(input_dim=args.mels,
@@ -520,6 +614,15 @@ def main(args):
                                 input_conv=False,
                                 cnn_kwargs=None)
     elif args.input_layer_type == 3:
+        assert args.transformer_input_layer == 'linear'
+        ema_model = Transformer(input_dim=args.mels,
+                                n_class=10,
+                                args=args,
+                                pooling=args.pooling_operator,
+                                input_conv=False,
+                                cnn_kwargs=None,
+                                pos_enc=False)
+    elif args.input_layer_type == 4:
         assert args.transformer_input_layer == 'linear'
         ema_model = Transformer(input_dim=args.mels,
                                 n_class=10,
@@ -531,72 +634,105 @@ def main(args):
     save_args(args, exp_name)
     if args.input_layer_type == 1:
         with open(os.path.join(exp_name, 'cnn_kwargs.pkl'), 'wb') as f:
-            import pickle
             pickle.dump(cnn_kwargs, f)
 
     with open(os.path.join(exp_name, 'args.pkl'), 'wb') as f:
-        import pickle
         pickle.dump(args, f)
 
     for param in ema_model.parameters():
         param.detach_()
 
     print(model)
-    solver = TransformerSolver(model,
-                               ema_model,
-                               train_synth_loader,
-                               train_weak_loader,
-                               train_unlabel_loader,
-                               exp_name=exp_name,
-                               args=args,
-                               criterion=torch.nn.BCELoss().cuda(),
-                               consistency_criterion=torch.nn.MSELoss().cuda(),
-                               accum_grad=args.accum_grad,
-                               rampup_length=args.iterations // 2,
-                               optimizer='adam',
-                               consistency_cost=2,
-                               data_parallel=args.ngpu > 1)
-
-    sample_rate = 44100 if args.n_frames == 864 else 16000
-    hop_length = 511 if args.n_frames == 864 else 320
+    
+    sample_rate, hop_length = get_sample_rate_and_hop_length(args)
 
     save_best_eb = SaveBest("sup")
+    
+#     no_of_samples = torch.zeros(10)
+#     for i, (data, target, data_id, mask) in enumerate(train_synth_loader):
+# #         import ipdb
+# #         ipdb.set_trace()
+#         no_of_samples += target[0].sum(dim=0)
+#         print(i, no_of_samples)
+#     aaaaa
+    
+    
+    
+    with mlflow.start_run(run_name=args.run_name):
+        # Log our parameters into mlflow
+        for key, value in vars(args).items():
+            mlflow.log_param(key, value)
 
-    train(solver, valid_loader, validation_df, many_hot_encoder.decode_strong, args, exp_name,
-          iteration=args.iterations,
-          log_interval=args.log_interval, save_best_eb=save_best_eb)
+        # Create a SummaryWriter to write TensorBoard events locally
+        output_dir = dirpath = tempfile.mkdtemp()
+        writer = SummaryWriter(output_dir)
+        print("Writing TensorBoard events locally to %s\n" % output_dir)
 
-    params = torch.load(os.path.join(exp_name, 'model', f"iteration_{args.iterations}.pth"))
-    solver.load(parameters=params)
+        solver = TransformerSolver(model,
+                                   ema_model,
+                                   train_synth_loader,
+                                   train_weak_loader,
+                                   train_unlabel_loader,
+                                   exp_name=exp_name,
+                                   args=args,
+                                   criterion=args.loss_function,
+                                   consistency_criterion=torch.nn.MSELoss().cuda(),
+                                   accum_grad=args.accum_grad,
+                                   rampup_length=args.iterations // 2,
+                                   optimizer=args.opt,
+                                   consistency_cost=2,
+                                   data_parallel=args.ngpu > 1,
+                                   writer=writer)
+        
+        train(solver, valid_loader, validation_df, many_hot_encoder.decode_strong, args, exp_name,
+              iteration=args.iterations,
+              log_interval=args.log_interval, save_best_eb=save_best_eb,
+              train_loader=train_synth_loader, train_df=synth_df)
 
-    predictions = TransformerSolver.get_predictions(solver, valid_loader, many_hot_encoder.decode_strong,
-                                                          post_processing=args.use_post_processing,
-                                                          save_predictions=os.path.join(exp_name, 'predictions',
-                                                                                        f'result.csv'))
-    valid_events_metric = compute_strong_metrics(predictions, validation_df, args.pooling_time_ratio,
-                                                 sample_rate=sample_rate, hop_length=hop_length)
-    best_th, best_f1 = search_best_threshold(solver, valid_loader, validation_df, many_hot_encoder, step=0.1)
-    best_fs, best_f1 = search_best_median(TransformerSolver, valid_loader, validation_df, many_hot_encoder,
-                                          spans=list(range(3, 31, 2)),
-                                          sample_rate=sample_rate, hop_length=hop_length)
-    best_ag, best_f1 = search_best_accept_gap(solver, valid_loader, validation_df, many_hot_encoder,
-                                              gaps=list(range(3, 30)),
-                                              sample_rate=sample_rate, hop_length=hop_length)
-    best_rd, best_f1 = search_best_remove_short_duration(solver, valid_loader, validation_df, many_hot_encoder,
-                                                         durations=list(range(3, 30)),
-                                                         sample_rate=sample_rate, hop_length=hop_length)
-    # LOG.info("Event-based: best macro-f1 setting: {}".format(best_event_epoch))
-    # LOG.info("Event-based: best macro-f1 setting: {}".format(best_event_f1))
+        # Upload the TensorBoard event logs as a run artifact
+        print("Uploading TensorBoard events as a run artifact...")
+        mlflow.log_artifacts(output_dir, artifact_path="events")
+        print("\nLaunch TensorBoard with:\n\ntensorboard --logdir=%s" %
+            os.path.join(mlflow.get_artifact_uri(), "events"))
+        
+#     with open(f'log/{args.run_name}.txt', 'w') as f:
+#         f.write("Event-based: best macro-f1 epoch: {}\n".format(best_event_iter))
+#         f.write("Event-based: best macro-f1 score: {}\n".format(best_event_f1))
 
-    # post_process_fn = [functools.partial(fill_up_gap, accepy_gap=list(best_fs.values())),
-    #                    functools.partial(search_up_gap, accepy_gap=list(best_fs.values())),
-    #                    functools.partial(fill_up_gap, accepy_gap=list(best_fs.values())),]
-    show_best(solver, valid_loader, many_hot_encoder.decode_strong, params=[best_th, best_fs, best_ag, best_rd])
-    print('===================')
-    print('best_th', best_th)
-    print('best_fs', best_fs)
-    print('best_ag', best_ag)
-    print('best_rd', best_rd)
+
+#     params = torch.load(os.path.join(exp_name, 'model', f"iteration_{args.iterations}.pth"))
+#     solver.load(parameters=params)
+
+#     predictions = TransformerSolver.get_predictions(solver, valid_loader, many_hot_encoder.decode_strong,
+#                                                           post_processing=args.use_post_processing,
+#                                                           save_predictions=os.path.join(exp_name, 'predictions',
+#                                                                                         f'result.csv'),
+#                                                     pooling_time_ratio=args.pooling_time_ratio,
+#                                                     sample_rate=sample_rate, hop_length=hop_length)
+#     valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
+#                                                  sample_rate=sample_rate, hop_length=hop_length)
+#     best_th, best_f1 = search_best_threshold(solver, valid_loader, validation_df, many_hot_encoder, step=0.1)
+#     best_fs, best_f1 = search_best_median(TransformerSolver, valid_loader, validation_df, many_hot_encoder,
+#                                           spans=list(range(3, 31, 2)),
+#                                           sample_rate=sample_rate, hop_length=hop_length)
+#     best_ag, best_f1 = search_best_accept_gap(solver, valid_loader, validation_df, many_hot_encoder,
+#                                               gaps=list(range(3, 30)),
+#                                               sample_rate=sample_rate, hop_length=hop_length)
+#     best_rd, best_f1 = search_best_remove_short_duration(solver, valid_loader, validation_df, many_hot_encoder,
+#                                                          durations=list(range(3, 30)),
+#                                                          sample_rate=sample_rate, hop_length=hop_length)
+#     # LOG.info("Event-based: best macro-f1 setting: {}".format(best_event_epoch))
+#     # LOG.info("Event-based: best macro-f1 setting: {}".format(best_event_f1))
+
+#     # post_process_fn = [functools.partial(fill_up_gap, accepy_gap=list(best_fs.values())),
+#     #                    functools.partial(search_up_gap, accepy_gap=list(best_fs.values())),
+#     #                    functools.partial(fill_up_gap, accepy_gap=list(best_fs.values())),]
+#     show_best(solver, valid_loader, many_hot_encoder.decode_strong, params=[best_th, best_fs, best_ag, best_rd])
+#     print('===================')
+#     print('best_th', best_th)
+#     print('best_fs', best_fs)
+#     print('best_ag', best_ag)
+#     print('best_rd', best_rd)
 
 
 if __name__ == '__main__':

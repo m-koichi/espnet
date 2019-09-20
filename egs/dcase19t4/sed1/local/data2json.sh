@@ -17,9 +17,9 @@ prefix=""
 filetype=""
 preprocess_conf=""
 
-train_dir=train_44k_mel128
-valid_dir=validation_44k_mel128
-eval_dir=eval_44k_mel128
+train_dir=train_16k_mel64
+valid_dir=validation_16k_mel64
+eval_dir=eval_16k_mel64
 
 . utils/parse_options.sh
 

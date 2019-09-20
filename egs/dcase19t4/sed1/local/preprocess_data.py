@@ -8,7 +8,7 @@ import sys
 # work_dir = espnet/egs/dcase19t4/sed1
 DATA_DIR = './DCASE2019_task4/dataset/metadata'
 AUDIO_DIR = os.path.join(os.getcwd(), 'DCASE2019_task4/dataset/audio')
-SOX_OPTION = '-r 44100 -c 1 -t wav'
+SOX_OPTION = '-r 16000 -c 1 -t wav'
 
 
 parser = argparse.ArgumentParser()
@@ -112,7 +112,7 @@ def main():
     os.makedirs(f'data/{args.valid_dir}', exist_ok=True)
     os.makedirs(f'data/{args.eval_dir}', exist_ok=True)
 
-    remove_missing_file_label()
+    # remove_missing_file_label()
     # make_eval_list()
     for x in [args.train_dir, args.valid_dir, args.eval_dir]:
         with open(os.path.join('data', x, 'text'), 'w') as text_f, \

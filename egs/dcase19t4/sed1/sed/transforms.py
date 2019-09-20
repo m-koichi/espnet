@@ -4,11 +4,15 @@ import librosa
 
 
 class Normalize(object):
-    def __init__(self, mean=None, std=None):
+    def __init__(self, mean=None, std=None, libro=False):
         self.mean = mean
         self.std = std
+        self.libro = libro
 
     def __call__(self, data):
+        if self.libro:
+            return librosa.util.normalize(data, axis=1)
+        
         if self.mean is not None and self.std is not None:
             return (data - self.mean) / self.std
         else:
@@ -17,7 +21,7 @@ class Normalize(object):
 
 
 class GaussianNoise:
-    def __init__(self, mean=0, std=0.5):
+    def __init__(self, mean=0, std=0.015):
         self.mean = mean
         self.std = std
 
@@ -31,6 +35,15 @@ class ApplyLog(object):
 
     def __call__(self, sample):
         return librosa.amplitude_to_db(sample)
+    
+    
+class Gain(object):
+    def __init__(self, low=0.8, high=1.2):
+        self.low = low
+        self.high = high
+
+    def __call__(self, sample):
+        return sample * np.random.uniform(low=self.low, high=self.high)
 
 
 class TimeWarp(object):
@@ -88,10 +101,15 @@ class TimeShift(object):
         self.mean = mean
         self.std = std
 
-    def __call__(self, data):
+    def __call__(self, data, label=None):
         shift = int(np.random.normal(self.mean, self.std))
-        data = np.roll(data, shift, axis=0)
-        return data
+        if label is not None:
+            data = np.roll(data, shift, axis=0)
+            label = np.roll(label, shift, axis=0)
+            return data, label
+        else:
+            data = np.roll(data, shift, axis=0)
+            return data
 
 
 class FrequencyShift(object):
@@ -106,15 +124,26 @@ class FrequencyShift(object):
 
 
 class SpecAugment:
-    def __init__(self, warp, freq, n_mask_freq, time, p, n_mask_time):
-        self.warp = warp
-        self.freq = freq
-        self.n_mask_freq = n_mask_freq
-        self.time = time
-        self.p = p
-        self.n_mask_time = n_mask_time
+    def __init__(self, W=5, F=20, T=40, num_freq_masks=2, num_time_masks=2, replace_with_zero=False):
+        self.W = W
+        self.F = F
+        self.T = T
+        self.num_freq_masks = num_freq_masks
+        self.num_time_masks = num_time_masks
+        self.replace_with_zero = replace_with_zero
 
-    def __call__(self, sample, *args, **kwargs):
+    def __call__(self, spec):
+        spec = torch.from_numpy(spec)
+        if self.W != 0:
+            spec = time_warp(spec, W=self.W)
+        if self.num_freq_masks != 0:
+            spec = freq_mask(spec, F=self.F, num_masks=self.num_freq_masks, replace_with_zero=self.replace_with_zero)
+        if self.num_time_masks != 0:
+            spec = time_mask(spec, T=self.T, num_masks=self.num_time_masks, replace_with_zero=self.replace_with_zero)
+        return spec.numpy()
+            
+        
+        
         sample = self.sparse_image_warp(sample)
         sample = self.frequecy_mask(sample)
         sample = self.time_mask(sample)
@@ -353,7 +382,8 @@ def solve_interpolation(train_points, train_values, order, regularization_weight
     rhs = torch.cat((f, rhs_zeros), 1)  # [b, n + d + 1, k]
 
     # Then, solve the linear system and unpack the results.
-    X, LU = torch.gesv(rhs, lhs)
+    #  X, LU = torch.gesv(rhs, lhs)
+    X, LU = torch.solve(rhs, lhs)
     w = X[:, :n, :]
     v = X[:, n:, :]
 
@@ -554,7 +584,7 @@ def interpolate_bilinear(grid,
         # alpha has the same type as the grid, as we will directly use alpha
         # when taking linear combinations of pixel values from the image.
 
-        alpha = torch.tensor((queries - floor), dtype=grid_type, device=grid_device)
+        alpha = queries.clone().detach() - floor.clone().detach()
         min_alpha = torch.tensor(0.0, dtype=grid_type, device=grid_device)
         max_alpha = torch.tensor(1.0, dtype=grid_type, device=grid_device)
         alpha = torch.min(torch.max(min_alpha, alpha), max_alpha)
