@@ -5,21 +5,21 @@
 echo "$0 $*" >&2 # Print the command line for logging
 . ./path.sh
 
-nj=1
+nj=32
 cmd=run.pl
 train_feat="" # feat.scp for training
 validation_feat="" # feat.scp for validation
 eval_feat="" # feat.scp for evaluation
 label="" # metadata directory e.g. ./DCASE2019_task4/dataset/metadata
 verbose=0
-augment_rep=0
-prefix=""
+augment_rep=20
+prefix=rvb
 filetype=""
 preprocess_conf=""
 
-train_dir=train_16k_mel64
-valid_dir=validation_16k_mel64
-eval_dir=eval_16k_mel64
+train_dir=train_16k_mel64_rir
+valid_dir=validation_16k_mel64_rir
+eval_dir=eval_16k_mel64_rir
 
 . utils/parse_options.sh
 
@@ -131,18 +131,23 @@ fi
 echo "output done"
 
 # perform data augmentation
+echo ${augment_rep}
+echo ${prefix}
 if [ ${augment_rep} -gt 0 ] && [ -n "${prefix}" ]; then
+    echo "start augmentation"
     for label_type in synthetic weak; do
         mv ${tmpdir}/output/label_${label_type}.scp ${tmpdir}/output/label_${label_type}.bak
         cat ${tmpdir}/output/label_${label_type}.bak | while read meta; do
             echo ${meta}
             for i in `seq 1 ${augment_rep}`; do
-                echo ${prefix}${i}_${meta}
+                echo ${prefix}${i}-${meta}
             done
         done > ${tmpdir}/output/label_${label_type}.scp
     done
+    echo "augmentation is done."
 fi
-
+cp ${tmpdir}/input/feats_synthetic.scp ./feats_tmp.scp
+cp ${tmpdir}/output/label_synthetic.scp ./label_tmp.scp
 # 3. Merge scp files into a JSON file
 # for x in train validation; do
 for x in ${train_dir} ${valid_dir} ${eval_dir}; do

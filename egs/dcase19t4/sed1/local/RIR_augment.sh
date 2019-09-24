@@ -13,8 +13,8 @@ fi
 
 . ./path.sh
 
-rirdir=/fsws1/share/database/RIRS_NOISES
-sampling_rate=44100
+rirdir=./RIRS_NOISES
+sampling_rate=16000
 num_replications=20
 
 . utils/parse_options.sh
@@ -37,3 +37,5 @@ steps/data/reverberate_data_dir.py \
 
 # Combine all directories
 utils/combine_data.sh data/$(basename $data)_aug ${data} data/$(basename $data)_reverb
+mv ${data} ${data}_bak
+mv data/$(basename $data)_aug ${data}
