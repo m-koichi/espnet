@@ -19,7 +19,7 @@ import config as cfg
 from transforms import Normalize, FrequencyMask, ApplyLog
 import functools
 import ipdb
-from my_utils import get_batch_predictions
+from my_utils import get_batch_predictions_trans
 
 LABELS = ['Alarm_bell_ringing', 'Blender', 'Cat', 'Dishes', 'Dog',
           'Electric_shaver_toothbrush', 'Frying', 'Running_water', 'Speech', 'Vacuum_cleaner']
@@ -34,7 +34,7 @@ def search_best_threshold(model, valid_loader, validation_df, many_hot_encoder, 
     model.eval()
     for th in np.arange(step, 1, step):
         print('th:', th)
-        predictions, _, _ , _, _, frame_measure, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+        predictions, _, _ , _, _, frame_measure, _ = get_batch_predictions_trans(model, valid_loader, many_hot_encoder.decode_strong,
                                                         post_processing=None, save_predictions=None,
                                                         pooling_time_ratio=pooling_time_ratio,
                                                         threshold=th, sample_rate=sample_rate,
@@ -56,7 +56,7 @@ def search_best_threshold(model, valid_loader, validation_df, many_hot_encoder, 
     for i, label in enumerate(LABELS):
         thres_list[i] = best_th[label]
 
-    predictions, _, _ , _, _, _, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong, post_processing=None,
+    predictions, _, _ , _, _, _, _ = get_batch_predictions_trans(model, valid_loader, many_hot_encoder.decode_strong, post_processing=None,
                                         threshold=thres_list, binarization_type='class_threshold',
                                         pooling_time_ratio=pooling_time_ratio,
                                         sample_rate=sample_rate,
@@ -316,14 +316,14 @@ def search_best_median(model, valid_loader, validation_df, many_hot_encoder, spa
         print('span:', span)
         post_process_fn = [functools.partial(median_filt_1d, filt_span=span)]
         if best_th is not None:
-            predictions, _, _, _, _, frame_measure, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+            predictions, _, _, _, _, frame_measure, _ = get_batch_predictions_trans(model, valid_loader, many_hot_encoder.decode_strong,
                                                             post_processing=post_process_fn, save_predictions=None,
                                                             threshold=best_th, binarization_type='class_threshold',
                                                             pooling_time_ratio=pooling_time_ratio,
                                                             sample_rate=sample_rate,
                                                             hop_length=hop_length)
         else:
-            predictions, _, _, _, _, frame_measure, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+            predictions, _, _, _, _, frame_measure, _ = get_batch_predictions_trans(model, valid_loader, many_hot_encoder.decode_strong,
                                                             post_processing=post_process_fn, save_predictions=None,
                                                             pooling_time_ratio=pooling_time_ratio,
                                                             sample_rate=sample_rate,
@@ -344,14 +344,14 @@ def search_best_median(model, valid_loader, validation_df, many_hot_encoder, spa
     # ipdb.set_trace()
     post_process_fn = [functools.partial(median_filt_1d, filt_span=list(best_span.values()))]
     if best_th is not None:
-        predictions, _, _, _, _, _, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+        predictions, _, _, _, _, _, _ = get_batch_predictions_trans(model, valid_loader, many_hot_encoder.decode_strong,
                                             post_processing=post_process_fn,
                                             threshold=best_th, binarization_type='class_threshold',
                                             pooling_time_ratio=pooling_time_ratio,
                                             sample_rate=sample_rate,
                                             hop_length=hop_length)
     else:
-        predictions, _, _, _, _, _, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+        predictions, _, _, _, _, _, _ = get_batch_predictions_trans(model, valid_loader, many_hot_encoder.decode_strong,
                                             post_processing=post_process_fn,
                                             pooling_time_ratio=pooling_time_ratio,
                                             sample_rate=sample_rate,
@@ -376,14 +376,14 @@ def search_best_accept_gap(model, valid_loader, validation_df, many_hot_encoder,
         post_process_fn = [functools.partial(fill_up_gap, accept_gap=gap)]
         
         if best_th is not None:
-            predictions, _, _, _, _, frame_measure, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+            predictions, _, _, _, _, frame_measure, _ = get_batch_predictions_trans(model, valid_loader, many_hot_encoder.decode_strong,
                                                             post_processing=post_process_fn, save_predictions=None,
                                                             threshold=best_th, binarization_type='class_threshold',
                                                             pooling_time_ratio=pooling_time_ratio,
                                                             sample_rate=sample_rate,
                                                             hop_length=hop_length)
         else:
-            predictions, _, _, _, _, frame_measure, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+            predictions, _, _, _, _, frame_measure, _ = get_batch_predictions_trans(model, valid_loader, many_hot_encoder.decode_strong,
                                                             post_processing=post_process_fn, save_predictions=None,
                                                             pooling_time_ratio=pooling_time_ratio,
                                                             sample_rate=sample_rate,
@@ -404,14 +404,14 @@ def search_best_accept_gap(model, valid_loader, validation_df, many_hot_encoder,
 
     post_process_fn = [functools.partial(fill_up_gap, accept_gap=list(best_gap.values()))]
     if best_th is not None:
-        predictions, _, _, _, _, _, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+        predictions, _, _, _, _, _, _ = get_batch_predictions_trans(model, valid_loader, many_hot_encoder.decode_strong,
                                             post_processing=post_process_fn,
                                             threshold=best_th, binarization_type='class_threshold',
                                             pooling_time_ratio=pooling_time_ratio,
                                             sample_rate=sample_rate,
                                             hop_length=hop_length)
     else:
-        predictions, _, _, _, _, _, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+        predictions, _, _, _, _, _, _ = get_batch_predictions_trans(model, valid_loader, many_hot_encoder.decode_strong,
                                             post_processing=post_process_fn,
                                             pooling_time_ratio=pooling_time_ratio,
                                             sample_rate=sample_rate,
@@ -435,14 +435,14 @@ def search_best_remove_short_duration(model, valid_loader, validation_df, many_h
         print('duration:', duration)
         post_process_fn = [functools.partial(remove_short_duration, reject_duration=duration)]
         if best_th is not None:
-            predictions, _, _, _, _, frame_measure, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+            predictions, _, _, _, _, frame_measure, _ = get_batch_predictions_trans(model, valid_loader, many_hot_encoder.decode_strong,
                                                 post_processing=post_process_fn,
                                                 threshold=best_th, binarization_type='class_threshold',
                                                 pooling_time_ratio=pooling_time_ratio,
                                                 sample_rate=sample_rate,
                                                 hop_length=hop_length)
         else:
-            predictions, _, _, _, _, frame_measure, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+            predictions, _, _, _, _, frame_measure, _ = get_batch_predictions_trans(model, valid_loader, many_hot_encoder.decode_strong,
                                                 post_processing=post_process_fn,
                                                 pooling_time_ratio=pooling_time_ratio,
                                                 sample_rate=sample_rate,
@@ -462,14 +462,14 @@ def search_best_remove_short_duration(model, valid_loader, validation_df, many_h
 
     post_process_fn = [functools.partial(remove_short_duration, reject_duration=list(best_duration.values()))]
     if best_th is not None:
-        predictions, _, _, _, _, _, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+        predictions, _, _, _, _, _, _ = get_batch_predictions_trans(model, valid_loader, many_hot_encoder.decode_strong,
                                             post_processing=post_process_fn,
                                             threshold=best_th, binarization_type='class_threshold',
                                             pooling_time_ratio=pooling_time_ratio,
                                             sample_rate=sample_rate,
                                             hop_length=hop_length)
     else:
-        predictions, _, _, _, _, _, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+        predictions, _, _, _, _, _, _ = get_batch_predictions_trans(model, valid_loader, many_hot_encoder.decode_strong,
                                             post_processing=post_process_fn,
                                             pooling_time_ratio=pooling_time_ratio,
                                             sample_rate=sample_rate,
@@ -491,7 +491,7 @@ def show_best(model, valid_loader, validation_df, many_hot_encoder, pp_params,
     post_processing_fn = [functools.partial(median_filt_1d, filt_span=list(best_fs)),
                           functools.partial(fill_up_gap, accept_gap=list(best_ag)),
                           functools.partial(remove_short_duration, reject_duration=list(best_rd))]
-    predictions, _, _, _, _, _, _ = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+    predictions, _, _, _, _, _, _ = get_batch_predictions_trans(model, valid_loader, many_hot_encoder.decode_strong,
                                         post_processing=post_processing_fn,
                                         threshold=best_th, binarization_type='class_threshold',
                                         pooling_time_ratio=pooling_time_ratio,
