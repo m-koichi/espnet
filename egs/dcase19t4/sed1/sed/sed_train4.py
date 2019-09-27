@@ -30,7 +30,7 @@ from utils import ramps
 from evaluation_measures import compute_strong_metrics, segment_based_evaluation_df
 import pdb
 
-from dataset import SEDDataset
+from dataset import SEDDataset, SEDDatasetEMA
 from transforms import Normalize, ApplyLog, GaussianNoise, FrequencyMask, TimeShift, FrequencyShift, Gain
 from solver.mcd import MCDSolver
 from solver.unet import UNet1D, BCEDiceLoss
@@ -584,7 +584,7 @@ def train_one_step(strong_loader, weak_loader, model, optimizer, logger, loss_fu
     strong_iter = cycle_iteration(strong_loader)
     weak_iter = cycle_iteration(weak_loader)
 
-    for i in range(1, iterations + 1):
+    for i in tqdm(range(1, iterations + 1)):
         strong_sample, strong_target, _ = next(strong_iter)
         weak_sample, weak_target, _ = next(weak_iter)
             
@@ -618,16 +618,16 @@ def train_one_step(strong_loader, weak_loader, model, optimizer, logger, loss_fu
                 #                                                                   f'result_{epoch}.csv'))
                 # valid_events_metric = compute_strong_metrics(predictions, synth_df, args.pooling_time_ratio)
 
-                predictions = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
-                                                    # post_processing=args.use_post_processing,
+                predictions, ave_precision, ave_recall, macro_f1, weak_f1 = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+                                                    post_processing=args.use_post_processing,
                                                     save_predictions=os.path.join(exp_name, 'predictions',
                                                                                   f'result_{i}.csv'),
                                                     transforms=None, mode='validation', logger=None,
-                                                    pooling_time_ratio=args.pooling_time_ratio, sample_rate=sample_rate, hop_length=hop_length)
-                valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
+                                                    pooling_time_ratio=args.pooling_time_ratio,
+                                                    sample_rate=sample_rate, hop_length=hop_length)
+                valid_events_metric, valid_segments_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
                                                              sample_rate=sample_rate, hop_length=hop_length)
-                valid_segments_metric = segment_based_evaluation_df(validation_df, predictions,
-                                                                    time_resolution=float(args.pooling_time_ratio))
+                                                             
                 # valid_events_metric = compute_strong_metrics(predictions, validation_df, 8)
             state['model']['state_dict'] = model.state_dict()
             # state['model_ema']['state_dict'] = crnn_ema.state_dict()
@@ -638,7 +638,7 @@ def train_one_step(strong_loader, weak_loader, model, optimizer, logger, loss_fu
 
             global_valid = valid_events_metric.results_class_wise_average_metrics()['f_measure']['f_measure']
 
-            if save_best_eb.apply(global_valid):
+            if save_best_eb.apply(macro_f1):
                 best_iterations = i
                 best_f1 = global_valid
                 model_fname = os.path.join(exp_name, 'model', "best.pth")
@@ -648,208 +648,213 @@ def train_one_step(strong_loader, weak_loader, model, optimizer, logger, loss_fu
     return best_iterations, best_f1
 
 
-def train_at_one_step_ema(strong_loader, weak_loader, unlabel_loader,
-                       strong_loader_ema, weak_loader_ema, unlabel_loader_ema,
-                       model, ema_model, optimizer, logger,
-                       loss_function='BCE', iterations=10000,
-                       log_interval=100,
-                       valid_loader=None,
-                       validation_df=None,
-                       many_hot_encoder=None,
-                       args=None,
-                       exp_name=None,
-                       state=None,
-                       save_best_eb=None,
-                       lr_scheduler=None,
-                       warm_start=True):
-    """ One epoch of a Mean Teacher model
-    :param train_loader: torch.utils.data.DataLoader, iterator of training batches for an epoch.
-    Should return 3 values: teacher input, student input, labels
-    :param model: torch.Module, model to be trained, should return a weak and strong prediction
-    :param optimizer: torch.Module, optimizer used to train the model
-    :param epoch: int, the current epoch of training
-    :param ema_model: torch.Module, student model, should return a weak and strong prediction
-    :param weak_mask: mask the batch to get only the weak labeled data (used to calculate the loss)
-    :param strong_mask: mask the batch to get only the strong labeled data (used to calcultate the loss)
-    """
-    if loss_function == 'BCE':
-        class_criterion = nn.BCELoss().to('cuda')
-    elif loss_function == 'FocalLoss':
-        class_criterion = FocalLoss(gamma=2).to('cuda')
-    consistency_criterion = nn.MSELoss().cuda()
-    # [class_criterion, consistency_criterion_strong] = to_cuda_if_available(
-    #     [class_criterion, consistency_criterion_strong])
+# def train_at_one_step_ema(strong_loader, weak_loader, unlabel_loader,
+#                        strong_loader_ema, weak_loader_ema, unlabel_loader_ema,
+#                        model, ema_model, optimizer, logger,
+#                        loss_function='BCE', iterations=10000,
+#                        log_interval=100,
+#                        valid_loader=None,
+#                        validation_df=None,
+#                        many_hot_encoder=None,
+#                        args=None,
+#                        exp_name=None,
+#                        state=None,
+#                        save_best_eb=None,
+#                        lr_scheduler=None,
+#                        warm_start=False):
+#     """ One epoch of a Mean Teacher model
+#     :param train_loader: torch.utils.data.DataLoader, iterator of training batches for an epoch.
+#     Should return 3 values: teacher input, student input, labels
+#     :param model: torch.Module, model to be trained, should return a weak and strong prediction
+#     :param optimizer: torch.Module, optimizer used to train the model
+#     :param epoch: int, the current epoch of training
+#     :param ema_model: torch.Module, student model, should return a weak and strong prediction
+#     :param weak_mask: mask the batch to get only the weak labeled data (used to calculate the loss)
+#     :param strong_mask: mask the batch to get only the strong labeled data (used to calcultate the loss)
+#     """
+#     if loss_function == 'BCE':
+#         class_criterion = nn.BCELoss().to('cuda')
+#     elif loss_function == 'FocalLoss':
+#         class_criterion = FocalLoss(gamma=2).to('cuda')
+#     consistency_criterion = nn.MSELoss().cuda()
+#     # [class_criterion, consistency_criterion_strong] = to_cuda_if_available(
+#     #     [class_criterion, consistency_criterion_strong])
 
-    # meters = AverageMeterSet()
+#     # meters = AverageMeterSet()
 
-    best_iterations = 0
-    best_f1 = 0
+#     best_iterations = 0
+#     best_f1 = 0
 
-    # rampup_length = len(strong_loader) * cfg.n_epoch // 2
-    global global_step
+#     # rampup_length = len(strong_loader) * cfg.n_epoch // 2
+#     global global_step
 
-    # LOG.debug("Nb batches: {}".format(len(train_loader)))
-    start = time.time()
-    rampup_length = iterations // 2
-    avg_strong_loss = 0
-    avg_weak_loss = 0
+#     # LOG.debug("Nb batches: {}".format(len(train_loader)))
+#     start = time.time()
+#     rampup_length = iterations // 2
+#     avg_strong_loss = 0
+#     avg_weak_loss = 0
 
-    sample_rate, hop_length = get_sample_rate_and_hop_length(args)
+#     sample_rate, hop_length = get_sample_rate_and_hop_length(args)
 
-    strong_iter = cycle_iteration(strong_loader)
-    weak_iter = cycle_iteration(weak_loader)
-    unlabel_iter = cycle_iteration(unlabel_loader)
+#     strong_iter = cycle_iteration(strong_loader)
+#     weak_iter = cycle_iteration(weak_loader)
+#     unlabel_iter = cycle_iteration(unlabel_loader)
 
-    strong_iter_ema = cycle_iteration(strong_loader_ema)
-    weak_iter_ema = cycle_iteration(weak_loader_ema)
-    unlabel_iter_ema = cycle_iteration(unlabel_loader_ema)
+#     strong_iter_ema = cycle_iteration(strong_loader_ema)
+#     weak_iter_ema = cycle_iteration(weak_loader_ema)
+#     unlabel_iter_ema = cycle_iteration(unlabel_loader_ema)
 
-    for i in range(1, iterations + 1):
-        global_step += 1
-        lr_scheduler.step()
-        if global_step < rampup_length:
-            rampup_value = ramps.sigmoid_rampup(global_step, rampup_length)
-        else:
-            rampup_value = 1.0
+#     for i in tqdm(range(1, iterations + 1)):
+#         global_step += 1
+# #         lr_scheduler.step()
+#         if global_step < rampup_length:
+#             rampup_value = ramps.sigmoid_rampup(global_step, rampup_length)
+#         else:
+#             rampup_value = 1.0
             
-        strong_sample, strong_target, strong_ids = next(strong_iter)
-        weak_sample, weak_target, weak_ids = next(weak_iter)
-        unlabel_sample, unlabel_target, unlabel_ids = next(unlabel_iter)
+#         strong_sample, strong_sample_ema, strong_target, strong_ids = next(strong_iter)
+#         weak_sample, weak_sample_ema, weak_target, weak_ids = next(weak_iter)
+#         unlabel_sample, unlabel_sample_ema, unlabel_target, unlabel_ids = next(unlabel_iter)
         
-        strong_sample_ema, strong_target_ema, strong_ids_ema = next(strong_iter_ema)
-        weak_sample_ema, weak_target_ema, weak_ids_ema = next(weak_iter_ema)
-        unlabel_sample_ema, unlabel_target_ema, unlabel_ids_ema = next(unlabel_iter_ema)
+# #         strong_sample_ema, strong_target_ema, strong_ids_ema = next(strong_iter_ema)
+# #         weak_sample_ema, weak_target_ema, weak_ids_ema = next(weak_iter_ema)
+# #         unlabel_sample_ema, unlabel_target_ema, unlabel_ids_ema = next(unlabel_iter_ema)
 
-        assert strong_ids == strong_ids_ema
-        assert weak_ids == weak_ids_ema
-        assert unlabel_ids == unlabel_ids_ema
+# #         assert strong_ids == strong_ids_ema
+# #         assert weak_ids == weak_ids_ema
+# #         assert unlabel_ids == unlabel_ids_ema
 
-        if warm_start and global_step < 2000:
+#         if warm_start and global_step < 2000:
 
-            strong_sample, strong_sample_ema = strong_sample.to('cuda'), strong_sample_ema.to('cuda')
-            strong_target, strong_target_ema = strong_target.to('cuda'), strong_target_ema.to('cuda')
-            weak_sample, weak_sample_ema = weak_sample.to('cuda'), weak_sample_ema.to('cuda')
-            weak_target, weak_target_ema = weak_target.to('cuda'), weak_target_ema.to('cuda')
-            unlabel_sample, unlabel_sample_ema = unlabel_sample.to('cuda'), unlabel_sample_ema.to('cuda')
+#             strong_sample, strong_sample_ema = strong_sample.to('cuda'), strong_sample_ema.to('cuda')
+#             strong_target, strong_target_ema = strong_target.to('cuda'), strong_target_ema.to('cuda')
+#             weak_sample, weak_sample_ema = weak_sample.to('cuda'), weak_sample_ema.to('cuda')
+#             weak_target, weak_target_ema = weak_target.to('cuda'), weak_target_ema.to('cuda')
+#             unlabel_sample, unlabel_sample_ema = unlabel_sample.to('cuda'), unlabel_sample_ema.to('cuda')
 
-            pred_strong_ema_s, pred_weak_ema_s = ema_model(strong_sample_ema)
-            pred_strong_ema_w, pred_weak_ema_w = ema_model(weak_sample_ema)
-            pred_strong_ema_u, pred_weak_ema_u = ema_model(unlabel_sample_ema)
-            pred_strong_ema_s, pred_strong_ema_w, pred_strong_ema_u = \
-                pred_strong_ema_s.detach(), pred_strong_ema_w.detach(), pred_strong_ema_u.detach()
-            pred_weak_ema_s, pred_weak_ema_u, pred_weak_ema_w = \
-                pred_weak_ema_s.detach(), pred_weak_ema_w.detach(), pred_weak_ema_u.detach()
+#             pred_strong_ema_s, pred_weak_ema_s = ema_model(strong_sample_ema)
+#             pred_strong_ema_w, pred_weak_ema_w = ema_model(weak_sample_ema)
+#             pred_strong_ema_u, pred_weak_ema_u = ema_model(unlabel_sample_ema)
+#             pred_strong_ema_s, pred_strong_ema_w, pred_strong_ema_u = \
+#                 pred_strong_ema_s.detach(), pred_strong_ema_w.detach(), pred_strong_ema_u.detach()
+#             pred_weak_ema_s, pred_weak_ema_w, pred_weak_ema_u = \
+#                 pred_weak_ema_s.detach(), pred_weak_ema_w.detach(), pred_weak_ema_u.detach()
             
 
-            pred_strong_s, pred_weak_s = model(strong_sample)
-            pred_strong_w, pred_weak_w = model(weak_sample)
-            pred_strong_u, pred_weak_u = model(unlabel_sample)
-            strong_class_loss = class_criterion(pred_strong_s, strong_target)
-            weak_class_loss = class_criterion(pred_weak_w, weak_target)
-            # compute consistency loss
-            consistency_cost = cfg.max_consistency_cost * rampup_value
-            consistency_loss_weak = consistency_cost * consistency_criterion(pred_weak_w, pred_weak_ema_w) \
-                                    + consistency_cost * consistency_criterion(pred_weak_u, pred_weak_ema_u)
+#             pred_strong_s, pred_weak_s = model(strong_sample)
+#             pred_strong_w, pred_weak_w = model(weak_sample)
+#             pred_strong_u, pred_weak_u = model(unlabel_sample)
+#             strong_class_loss = class_criterion(pred_strong_s, strong_target)
+#             weak_class_loss = class_criterion(pred_weak_w, weak_target)
+#             # compute consistency loss
+#             consistency_cost = cfg.max_consistency_cost * rampup_value
+#             consistency_loss_weak = consistency_cost * consistency_criterion(pred_weak_w, pred_weak_ema_w) \
+#                                     + consistency_cost * consistency_criterion(pred_weak_u, pred_weak_ema_u)
 
-            logger.scalar_summary('train_weak_loss', weak_class_loss.item(), global_step)
+#             logger.scalar_summary('train_weak_loss', weak_class_loss.item(), global_step)
 
-            loss = weak_class_loss + consistency_loss_weak
+#             loss = weak_class_loss + consistency_loss_weak
 
-        else:
-            strong_sample, strong_sample_ema = strong_sample.to('cuda'), strong_sample_ema.to('cuda')
-            strong_target, strong_target_ema = strong_target.to('cuda'), strong_target_ema.to('cuda')
-            weak_sample, weak_sample_ema = weak_sample.to('cuda'), weak_sample_ema.to('cuda')
-            weak_target, weak_target_ema = weak_target.to('cuda'), weak_target_ema.to('cuda')
-            unlabel_sample, unlabel_sample_ema = unlabel_sample.to('cuda'), unlabel_sample_ema.to('cuda')
+#         else:
+#             strong_sample, strong_sample_ema = strong_sample.to('cuda'), strong_sample_ema.to('cuda')
+#             strong_target, strong_target_ema = strong_target.to('cuda'), strong_target_ema.to('cuda')
+#             weak_sample, weak_sample_ema = weak_sample.to('cuda'), weak_sample_ema.to('cuda')
+#             weak_target, weak_target_ema = weak_target.to('cuda'), weak_target_ema.to('cuda')
+#             unlabel_sample, unlabel_sample_ema = unlabel_sample.to('cuda'), unlabel_sample_ema.to('cuda')
 
-            pred_strong_ema_s, pred_weak_ema_s = ema_model(strong_sample_ema)
-            pred_strong_ema_w, pred_weak_ema_w = ema_model(weak_sample_ema)
-            pred_strong_ema_u, pred_weak_ema_u = ema_model(unlabel_sample_ema)
-            pred_strong_ema_s, pred_strong_ema_w, pred_strong_ema_u = \
-                pred_strong_ema_s.detach(), pred_strong_ema_w.detach(), pred_strong_ema_u.detach()
-            pred_weak_ema_s, pred_weak_ema_u, pred_weak_ema_w = \
-                pred_weak_ema_s.detach(), pred_weak_ema_w.detach(), pred_weak_ema_u.detach()
+#             pred_strong_ema_s, pred_weak_ema_s = ema_model(strong_sample_ema)
+#             pred_strong_ema_w, pred_weak_ema_w = ema_model(weak_sample_ema)
+#             pred_strong_ema_u, pred_weak_ema_u = ema_model(unlabel_sample_ema)
+#             pred_strong_ema_s, pred_strong_ema_w, pred_strong_ema_u = \
+#                 pred_strong_ema_s.detach(), pred_strong_ema_w.detach(), pred_strong_ema_u.detach()
+#             pred_weak_ema_s, pred_weak_ema_w, pred_weak_ema_u = \
+#                 pred_weak_ema_s.detach(), pred_weak_ema_w.detach(), pred_weak_ema_u.detach()
 
-            pred_strong_s, pred_weak_s = model(strong_sample)
-            pred_strong_w, pred_weak_w = model(weak_sample)
-            pred_strong_u, pred_weak_u = model(unlabel_sample)
-            strong_class_loss = class_criterion(pred_strong_s, strong_target)
-            weak_class_loss = class_criterion(pred_weak_w, weak_target)
+#             pred_strong_s, pred_weak_s = model(strong_sample)
+#             pred_strong_w, pred_weak_w = model(weak_sample)
+#             pred_strong_u, pred_weak_u = model(unlabel_sample)
+            
+#             strong_class_loss = class_criterion(pred_strong_s, strong_target)
+#             strong_class_ema_loss = consistency_criterion(pred_strong_s, pred_strong_ema_s) \
+#                                     + consistency_criterion(pred_strong_w, pred_strong_ema_w) \
+#                                     + consistency_criterion(pred_strong_u, pred_strong_ema_u)
+            
+#             weak_class_loss = class_criterion(pred_weak_w, weak_target)
+#             weak_class_ema_loss = consistency_criterion(pred_weak_s, pred_weak_ema_s) \
+#                                   + consistency_criterion(pred_weak_w, pred_weak_ema_w) \
+#                                   + consistency_criterion(pred_weak_u, pred_weak_ema_u)
 
-            # compute consistency loss
-            consistency_cost = cfg.max_consistency_cost * rampup_value
-            consistency_loss_strong = consistency_cost * (consistency_criterion(pred_strong_s, pred_strong_ema_s) \
-                                                          + consistency_criterion(pred_strong_w, pred_strong_ema_w) \
-                                                          + consistency_criterion(pred_strong_u, pred_strong_ema_u))
-            consistency_loss_weak = consistency_cost * (consistency_criterion(pred_weak_s, pred_weak_ema_s) \
-                                                        + consistency_criterion(pred_weak_w, pred_weak_ema_w) \
-                                                        + consistency_criterion(pred_weak_u, pred_weak_ema_u))
+#             # compute consistency loss
+#             consistency_cost = cfg.max_consistency_cost * rampup_value
+#             consistency_loss_strong = consistency_cost * strong_class_ema_loss
+#             consistency_loss_weak = consistency_cost * weak_class_ema_loss
 
-            logger.scalar_summary('train_strong_loss', strong_class_loss.item(), global_step)
-            logger.scalar_summary('train_weak_loss', weak_class_loss.item(), global_step)
+#             logger.scalar_summary('train_strong_loss', strong_class_loss.item(), global_step)
+#             logger.scalar_summary('train_weak_loss', weak_class_loss.item(), global_step)
 
-            loss = strong_class_loss + weak_class_loss + consistency_loss_strong + consistency_loss_weak
+#             loss = strong_class_loss + weak_class_loss + consistency_loss_strong + consistency_loss_weak
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+#         optimizer.zero_grad()
+#         loss.backward()
+#         optimizer.step()
 
-        update_ema_variables(model, ema_model, 0.999, global_step)
+#         update_ema_variables(model, ema_model, 0.999, global_step)
 
-        if i % log_interval == 0:
-            model.eval()
-            ema_model.eval()
-            with torch.no_grad():
-                predictions = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
-                                                    post_processing=args.use_post_processing,
-                                                    save_predictions=os.path.join(exp_name, 'predictions',
-                                                                                  f'result_{i}.csv'),
-                                                    transforms=None, mode='validation', logger=None,
-                                                    pooling_time_ratio=args.pooling_time_ratio,
-                                                    sample_rate=sample_rate, hop_length=hop_length)
-                valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
-                                                             sample_rate=sample_rate, hop_length=hop_length)
+#         if i % log_interval == 0:
+#             model.eval()
+#             ema_model.eval()
+#             with torch.no_grad():
+#                 print("========== student model prediction ==========")
+#                 predictions, ave_precision, ave_recall, macro_f1, weak_f1 = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+#                                                     post_processing=args.use_post_processing,
+#                                                     save_predictions=os.path.join(exp_name, 'predictions',
+#                                                                                   f'result_{i}.csv'),
+#                                                     transforms=None, mode='validation', logger=None,
+#                                                     pooling_time_ratio=args.pooling_time_ratio,
+#                                                     sample_rate=sample_rate, hop_length=hop_length)
+#                 valid_events_metric, valid_segments_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
+#                                                              sample_rate=sample_rate, hop_length=hop_length)
 
-                predictions = get_batch_predictions(ema_model, valid_loader, many_hot_encoder.decode_strong,
-                                                    post_processing=args.use_post_processing,
-                                                    save_predictions=os.path.join(exp_name, 'predictions',
-                                                                                  f'ema_result_{i}.csv'),
-                                                    transforms=None, mode='validation', logger=None,
-                                                    pooling_time_ratio=args.pooling_time_ratio,
-                                                    sample_rate=sample_rate, hop_length=hop_length)
-                ema_valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
-                                                                 sample_rate=sample_rate, hop_length=hop_length)
+                
+#                 print("========== mean teacher model prediction ==========")
+#                 predictions, ave_precision, ave_recall, macro_f1, weak_f1 = get_batch_predictions(ema_model, valid_loader, many_hot_encoder.decode_strong,
+#                                                     post_processing=args.use_post_processing,
+#                                                     save_predictions=os.path.join(exp_name, 'predictions',
+#                                                                                   f'ema_result_{i}.csv'),
+#                                                     transforms=None, mode='validation', logger=None,
+#                                                     pooling_time_ratio=args.pooling_time_ratio,
+#                                                     sample_rate=sample_rate, hop_length=hop_length)
+#                 ema_valid_events_metric, ema_valid_segments_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
+#                                                                  sample_rate=sample_rate, hop_length=hop_length)
 
-            state['model']['state_dict'] = model.state_dict()
-            # state['model_ema']['state_dict'] = crnn_ema.state_dict()
-            state['optimizer']['state_dict'] = optimizer.state_dict()
-            state['iterations'] = i
-            state['valid_metric'] = valid_events_metric.results()
-            torch.save(state, os.path.join(exp_name, 'model', f'iteration_{i}.pth'))
+#             state['model']['state_dict'] = model.state_dict()
+#             # state['model_ema']['state_dict'] = crnn_ema.state_dict()
+#             state['optimizer']['state_dict'] = optimizer.state_dict()
+#             state['iterations'] = i
+#             state['valid_metric'] = valid_events_metric.results()
+#             torch.save(state, os.path.join(exp_name, 'model', f'iteration_{i}.pth'))
 
-            state['model']['state_dict'] = ema_model.state_dict()
-            # state['model_ema']['state_dict'] = crnn_ema.state_dict()
-            # state['optimizer']['state_dict'] = optimizer.state_dict()
-            state['iterations'] = i
-            state['valid_metric'] = ema_valid_events_metric.results()
-            torch.save(state, os.path.join(exp_name, 'model', f'ema_iteration_{i}.pth'))
+#             state['model']['state_dict'] = ema_model.state_dict()
+#             # state['model_ema']['state_dict'] = crnn_ema.state_dict()
+#             # state['optimizer']['state_dict'] = optimizer.state_dict()
+#             state['iterations'] = i
+#             state['valid_metric'] = ema_valid_events_metric.results()
+#             torch.save(state, os.path.join(exp_name, 'model', f'ema_iteration_{i}.pth'))
 
-            global_valid = valid_events_metric.results_class_wise_average_metrics()['f_measure']['f_measure']
+#             global_valid = valid_events_metric.results_class_wise_average_metrics()['f_measure']['f_measure']
 
-            if save_best_eb.apply(global_valid):
-                best_iterations = i
-                best_f1 = global_valid
-                model_fname = os.path.join(exp_name, 'model', "best.pth")
-                torch.save(state, model_fname)
-            model.train()
-            ema_model.train()
+#             if save_best_eb.apply(global_valid):
+#                 best_iterations = i
+#                 best_f1 = global_valid
+#                 model_fname = os.path.join(exp_name, 'model', "best.pth")
+#                 torch.save(state, model_fname)
+#             model.train()
+#             ema_model.train()
 
-    return best_iterations, best_f1
-
+#     return best_iterations, best_f1
 
 
 def train_one_step_ema(strong_loader, weak_loader, unlabel_loader,
-                       strong_loader_ema, weak_loader_ema, unlabel_loader_ema,
                        model, ema_model, optimizer, logger,
                        loss_function='BCE', iterations=10000,
                        log_interval=100,
@@ -861,7 +866,7 @@ def train_one_step_ema(strong_loader, weak_loader, unlabel_loader,
                        state=None,
                        save_best_eb=None,
                        lr_scheduler=None,
-                       warm_start=True):
+                       warm_start=False):
     """ One epoch of a Mean Teacher model
     :param train_loader: torch.utils.data.DataLoader, iterator of training batches for an epoch.
     Should return 3 values: teacher input, student input, labels
@@ -893,6 +898,8 @@ def train_one_step_ema(strong_loader, weak_loader, unlabel_loader,
     rampup_length = iterations // 2
     avg_strong_loss = 0
     avg_weak_loss = 0
+    avg_strong_loss_ema = 0
+    avg_weak_loss_ema = 0
 
     sample_rate, hop_length = get_sample_rate_and_hop_length(args)
 
@@ -900,146 +907,174 @@ def train_one_step_ema(strong_loader, weak_loader, unlabel_loader,
     weak_iter = cycle_iteration(weak_loader)
     unlabel_iter = cycle_iteration(unlabel_loader)
 
-    strong_iter_ema = cycle_iteration(strong_loader_ema)
-    weak_iter_ema = cycle_iteration(weak_loader_ema)
-    unlabel_iter_ema = cycle_iteration(unlabel_loader_ema)
-
-    for i in range(1, iterations + 1):
+    for i in tqdm(range(1, iterations + 1)):
         global_step += 1
-        lr_scheduler.step()
+#         lr_scheduler.step()
         if global_step < rampup_length:
             rampup_value = ramps.sigmoid_rampup(global_step, rampup_length)
         else:
             rampup_value = 1.0
             
-        strong_sample, strong_target, strong_ids = next(strong_iter)
-        weak_sample, weak_target, weak_ids = next(weak_iter)
-        unlabel_sample, unlabel_target, unlabel_ids = next(unlabel_iter)
-        
-        strong_sample_ema, strong_target_ema, strong_ids_ema = next(strong_iter_ema)
-        weak_sample_ema, weak_target_ema, weak_ids_ema = next(weak_iter_ema)
-        unlabel_sample_ema, unlabel_target_ema, unlabel_ids_ema = next(unlabel_iter_ema)
+        strong_sample, strong_sample_ema, strong_target, strong_ids = next(strong_iter)
+        weak_sample, weak_sample_ema, weak_target, weak_ids = next(weak_iter)
+        unlabel_sample, unlabel_sample_ema, unlabel_target, unlabel_ids = next(unlabel_iter)
 
-        assert strong_ids == strong_ids_ema
-        assert weak_ids == weak_ids_ema
-        assert unlabel_ids == unlabel_ids_ema
+#         if warm_start and global_step < 2000:
 
-        if warm_start and global_step < 2000:
+#             strong_sample, strong_sample_ema = strong_sample.to('cuda'), strong_sample_ema.to('cuda')
+#             strong_target, strong_target_ema = strong_target.to('cuda'), strong_target_ema.to('cuda')
+#             weak_sample, weak_sample_ema = weak_sample.to('cuda'), weak_sample_ema.to('cuda')
+#             weak_target, weak_target_ema = weak_target.to('cuda'), weak_target_ema.to('cuda')
+#             unlabel_sample, unlabel_sample_ema = unlabel_sample.to('cuda'), unlabel_sample_ema.to('cuda')
 
-            strong_sample, strong_sample_ema = strong_sample.to('cuda'), strong_sample_ema.to('cuda')
-            strong_target, strong_target_ema = strong_target.to('cuda'), strong_target_ema.to('cuda')
-            weak_sample, weak_sample_ema = weak_sample.to('cuda'), weak_sample_ema.to('cuda')
-            weak_target, weak_target_ema = weak_target.to('cuda'), weak_target_ema.to('cuda')
-            unlabel_sample, unlabel_sample_ema = unlabel_sample.to('cuda'), unlabel_sample_ema.to('cuda')
-
-            pred_strong_ema_s, pred_weak_ema_s = ema_model(strong_sample_ema)
-            pred_strong_ema_w, pred_weak_ema_w = ema_model(weak_sample_ema)
-            pred_strong_ema_u, pred_weak_ema_u = ema_model(unlabel_sample_ema)
-            pred_strong_ema_s, pred_strong_ema_w, pred_strong_ema_u = \
-                pred_strong_ema_s.detach(), pred_strong_ema_w.detach(), pred_strong_ema_u.detach()
-            pred_weak_ema_s, pred_weak_ema_u, pred_weak_ema_w = \
-                pred_weak_ema_s.detach(), pred_weak_ema_w.detach(), pred_weak_ema_u.detach()
+#             pred_strong_ema_s, pred_weak_ema_s = ema_model(strong_sample_ema)
+#             pred_strong_ema_w, pred_weak_ema_w = ema_model(weak_sample_ema)
+#             pred_strong_ema_u, pred_weak_ema_u = ema_model(unlabel_sample_ema)
+#             pred_strong_ema_s, pred_strong_ema_w, pred_strong_ema_u = \
+#                 pred_strong_ema_s.detach(), pred_strong_ema_w.detach(), pred_strong_ema_u.detach()
+#             pred_weak_ema_s, pred_weak_ema_u, pred_weak_ema_w = \
+#                 pred_weak_ema_s.detach(), pred_weak_ema_w.detach(), pred_weak_ema_u.detach()
             
 
-            pred_strong_s, pred_weak_s = model(strong_sample)
-            pred_strong_w, pred_weak_w = model(weak_sample)
-            pred_strong_u, pred_weak_u = model(unlabel_sample)
-            strong_class_loss = class_criterion(pred_strong_s, strong_target)
-            weak_class_loss = class_criterion(pred_weak_w, weak_target)
-            # compute consistency loss
-            consistency_cost = cfg.max_consistency_cost * rampup_value
-            consistency_loss_weak = consistency_cost * consistency_criterion(pred_weak_w, pred_weak_ema_w) \
-                                    + consistency_cost * consistency_criterion(pred_weak_u, pred_weak_ema_u)
+#             pred_strong_s, pred_weak_s = model(strong_sample)
+#             pred_strong_w, pred_weak_w = model(weak_sample)
+#             pred_strong_u, pred_weak_u = model(unlabel_sample)
+#             strong_class_loss = class_criterion(pred_strong_s, strong_target)
+#             weak_class_loss = class_criterion(pred_weak_w, weak_target)
+#             # compute consistency loss
+#             consistency_cost = cfg.max_consistency_cost * rampup_value
+#             consistency_loss_weak = consistency_cost * consistency_criterion(pred_weak_w, pred_weak_ema_w) \
+#                                     + consistency_cost * consistency_criterion(pred_weak_u, pred_weak_ema_u)
 
-            logger.scalar_summary('train_weak_loss', weak_class_loss.item(), global_step)
+#             logger.scalar_summary('train_weak_loss', weak_class_loss.item(), global_step)
 
-            loss = weak_class_loss + consistency_loss_weak
+#             loss = weak_class_loss + consistency_loss_weak
 
-        else:
-            strong_sample, strong_sample_ema = strong_sample.to('cuda'), strong_sample_ema.to('cuda')
-            strong_target, strong_target_ema = strong_target.to('cuda'), strong_target_ema.to('cuda')
-            weak_sample, weak_sample_ema = weak_sample.to('cuda'), weak_sample_ema.to('cuda')
-            weak_target, weak_target_ema = weak_target.to('cuda'), weak_target_ema.to('cuda')
-            unlabel_sample, unlabel_sample_ema = unlabel_sample.to('cuda'), unlabel_sample_ema.to('cuda')
+        strong_sample, strong_sample_ema = strong_sample.to('cuda'), strong_sample_ema.to('cuda')
+        strong_target = strong_target.to('cuda')
+        weak_sample, weak_sample_ema = weak_sample.to('cuda'), weak_sample_ema.to('cuda')
+        weak_target = weak_target.to('cuda')
+        unlabel_sample, unlabel_sample_ema = unlabel_sample.to('cuda'), unlabel_sample_ema.to('cuda')
 
-            pred_strong_ema_s, pred_weak_ema_s = ema_model(strong_sample_ema)
-            pred_strong_ema_w, pred_weak_ema_w = ema_model(weak_sample_ema)
-            pred_strong_ema_u, pred_weak_ema_u = ema_model(unlabel_sample_ema)
-            pred_strong_ema_s, pred_strong_ema_w, pred_strong_ema_u = \
-                pred_strong_ema_s.detach(), pred_strong_ema_w.detach(), pred_strong_ema_u.detach()
-            pred_weak_ema_s, pred_weak_ema_u, pred_weak_ema_w = \
-                pred_weak_ema_s.detach(), pred_weak_ema_w.detach(), pred_weak_ema_u.detach()
+        pred_strong_ema_s, pred_weak_ema_s = ema_model(strong_sample_ema)
+        pred_strong_ema_w, pred_weak_ema_w = ema_model(weak_sample_ema)
+        pred_strong_ema_u, pred_weak_ema_u = ema_model(unlabel_sample_ema)
+        pred_strong_ema_s, pred_strong_ema_w, pred_strong_ema_u = \
+            pred_strong_ema_s.detach(), pred_strong_ema_w.detach(), pred_strong_ema_u.detach()
+        pred_weak_ema_s, pred_weak_ema_w, pred_weak_ema_u = \
+            pred_weak_ema_s.detach(), pred_weak_ema_w.detach(), pred_weak_ema_u.detach()
 
-            pred_strong_s, pred_weak_s = model(strong_sample)
-            pred_strong_w, pred_weak_w = model(weak_sample)
-            pred_strong_u, pred_weak_u = model(unlabel_sample)
-            strong_class_loss = class_criterion(pred_strong_s, strong_target)
-            weak_class_loss = class_criterion(pred_weak_w, weak_target)
+        pred_strong_s, pred_weak_s = model(strong_sample)
+        pred_strong_w, pred_weak_w = model(weak_sample)
+        pred_strong_u, pred_weak_u = model(unlabel_sample)
+        
+        strong_class_loss = class_criterion(pred_strong_s, strong_target)
+        strong_class_ema_loss = consistency_criterion(pred_strong_s, pred_strong_ema_s) \
+                                + consistency_criterion(pred_strong_w, pred_strong_ema_w) \
+                                + consistency_criterion(pred_strong_u, pred_strong_ema_u)
 
-            # compute consistency loss
-            consistency_cost = cfg.max_consistency_cost * rampup_value
-            consistency_loss_strong = consistency_cost * (consistency_criterion(pred_strong_s, pred_strong_ema_s) \
-                                                          + consistency_criterion(pred_strong_w, pred_strong_ema_w) \
-                                                          + consistency_criterion(pred_strong_u, pred_strong_ema_u))
-            consistency_loss_weak = consistency_cost * (consistency_criterion(pred_weak_s, pred_weak_ema_s) \
-                                                        + consistency_criterion(pred_weak_w, pred_weak_ema_w) \
-                                                        + consistency_criterion(pred_weak_u, pred_weak_ema_u))
+        weak_class_loss = class_criterion(pred_weak_w, weak_target)
+        weak_class_ema_loss = consistency_criterion(pred_weak_s, pred_weak_ema_s) \
+                              + consistency_criterion(pred_weak_w, pred_weak_ema_w) \
+                              + consistency_criterion(pred_weak_u, pred_weak_ema_u)
 
-            logger.scalar_summary('train_strong_loss', strong_class_loss.item(), global_step)
-            logger.scalar_summary('train_weak_loss', weak_class_loss.item(), global_step)
+        # compute consistency loss
+        consistency_cost = cfg.max_consistency_cost * rampup_value
+        consistency_loss_strong = consistency_cost * strong_class_ema_loss
+        consistency_loss_weak = consistency_cost * weak_class_ema_loss
 
-            loss = strong_class_loss + weak_class_loss + consistency_loss_strong + consistency_loss_weak
+        logger.scalar_summary('train_strong_loss', strong_class_loss.item(), global_step)
+        logger.scalar_summary('train_weak_loss', weak_class_loss.item(), global_step)
+        
+        avg_strong_loss += strong_class_loss.item() / log_interval
+        avg_weak_loss += weak_class_loss.item() / log_interval
+        avg_strong_loss_ema += consistency_loss_strong.item() / log_interval
+        avg_weak_loss_ema += consistency_loss_weak.item() / log_interval
+
+        loss = strong_class_loss + weak_class_loss + consistency_loss_strong + consistency_loss_weak
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
         update_ema_variables(model, ema_model, 0.999, global_step)
-
+        
         if i % log_interval == 0:
             model.eval()
             ema_model.eval()
             with torch.no_grad():
-                predictions = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
+                print("========== student model prediction ==========")
+                predictions, ave_precision, ave_recall, macro_f1, weak_f1 = get_batch_predictions(model, valid_loader, many_hot_encoder.decode_strong,
                                                     post_processing=args.use_post_processing,
                                                     save_predictions=os.path.join(exp_name, 'predictions',
                                                                                   f'result_{i}.csv'),
                                                     transforms=None, mode='validation', logger=None,
                                                     pooling_time_ratio=args.pooling_time_ratio,
                                                     sample_rate=sample_rate, hop_length=hop_length)
-                valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
+                valid_events_metric, valid_segments_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
                                                              sample_rate=sample_rate, hop_length=hop_length)
 
-                predictions = get_batch_predictions(ema_model, valid_loader, many_hot_encoder.decode_strong,
+                print("========== mean teacher model prediction ==========")
+                predictions, ave_precision, ave_recall, macro_f1, weak_f1 = get_batch_predictions(ema_model, valid_loader, many_hot_encoder.decode_strong,
                                                     post_processing=args.use_post_processing,
                                                     save_predictions=os.path.join(exp_name, 'predictions',
                                                                                   f'ema_result_{i}.csv'),
                                                     transforms=None, mode='validation', logger=None,
                                                     pooling_time_ratio=args.pooling_time_ratio,
                                                     sample_rate=sample_rate, hop_length=hop_length)
-                ema_valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
+                ema_valid_events_metric, ema_valid_segments_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
                                                                  sample_rate=sample_rate, hop_length=hop_length)
 
             state['model']['state_dict'] = model.state_dict()
-            # state['model_ema']['state_dict'] = crnn_ema.state_dict()
+            state['ema_model']['state_dict'] = ema_model.state_dict()
             state['optimizer']['state_dict'] = optimizer.state_dict()
             state['iterations'] = i
-            state['valid_metric'] = valid_events_metric.results()
+            state['valid_metric'] = ema_valid_events_metric.results()
             torch.save(state, os.path.join(exp_name, 'model', f'iteration_{i}.pth'))
 
-            state['model']['state_dict'] = ema_model.state_dict()
-            # state['model_ema']['state_dict'] = crnn_ema.state_dict()
-            # state['optimizer']['state_dict'] = optimizer.state_dict()
-            state['iterations'] = i
-            state['valid_metric'] = ema_valid_events_metric.results()
-            torch.save(state, os.path.join(exp_name, 'model', f'ema_iteration_{i}.pth'))
+#             state['ema_model']['state_dict'] = ema_model.state_dict()
+#             # state['model_ema']['state_dict'] = crnn_ema.state_dict()
+#             # state['optimizer']['state_dict'] = optimizer.state_dict()
+#             state['iterations'] = i
+#             state['valid_metric'] = ema_valid_events_metric.results()
+#             torch.save(state, os.path.join(exp_name, 'model', f'ema_iteration_{i}.pth'))
 
-            global_valid = valid_events_metric.results_class_wise_average_metrics()['f_measure']['f_measure']
+            global_valid = ema_valid_events_metric.results_class_wise_average_metrics()['f_measure']['f_measure']
+            segment_valid = ema_valid_segments_metric.results_class_wise_average_metrics()['f_measure']['f_measure']
+            with open(os.path.join(exp_name, 'log', f'result_iteration{i}.txt'), 'w') as f:
+                f.write(f"Event-based macro-f1: {global_valid * 100:.4}\n")
+                f.write(f"Segment-based macro-f1: {segment_valid * 100:.4}\n")
+                f.write(f"Frame-based macro-f1: {macro_f1 * 100:.4}\n")
+                f.write(f"Frame-based ave_precision: {ave_precision * 100:.4}\n")
+                f.write(f"Frame-based ave_recall: {ave_recall * 100:.4}\n")
+                f.write(f"weak-f1: {weak_f1 * 100:.4}\n")
+                f.write(str(ema_valid_events_metric))
+                f.write(str(ema_valid_segments_metric))
+            LOG.info(f'after {i} iteration')
+            LOG.info(f'\t Ave. strong class loss: {avg_strong_loss}')
+            LOG.info(f'\t Ave. weak class loss: {avg_weak_loss}')
+            LOG.info(f'\t Ave. consistency loss strong: {avg_strong_loss_ema}')
+            LOG.info(f'\t Ave. consistency loss weak: {avg_weak_loss_ema}')
+            avg_strong_loss = 0
+            avg_weak_loss = 0
+            avg_strong_loss_ema = 0
+            avg_weak_loss_ema = 0
+            
 
-            if save_best_eb.apply(global_valid):
+#             if save_best_eb.apply(global_valid):
+            if save_best_eb.apply(macro_f1):
                 best_iterations = i
                 best_f1 = global_valid
                 model_fname = os.path.join(exp_name, 'model', "best.pth")
+                with open(os.path.join(exp_name, 'log', f'result_iteration{i}.txt'), 'w') as f:
+                    f.write(f"Event-based macro-f1: {global_valid * 100:.4}\n")
+                    f.write(f"Segment-based macro-f1: {segment_valid * 100:.4}\n")
+                    f.write(f"Frame-based macro-f1: {macro_f1 * 100:.4}\n")
+                    f.write(f"Frame-based ave_precision: {ave_precision * 100:.4}\n")
+                    f.write(f"Frame-based ave_recall: {ave_recall * 100:.4}\n")
+                    f.write(f"weak-f1: {weak_f1 * 100:.4}\n")
+                    f.write(str(ema_valid_events_metric))
+                    f.write(str(ema_valid_segments_metric))
                 torch.save(state, model_fname)
             model.train()
             ema_model.train()
@@ -1309,6 +1344,8 @@ def main(args):
                         help='training dataset for AT. 1:weak only, 2:weak and strong, 3: strong only. (default=1)')
     parser.add_argument('--pretrained', default=None,
                         help='begin training from pre-trained weight')
+    parser.add_argument('--ssl', default=False, type=strtobool,
+                        help='semi supervised learning (mean teacher)')
 
     args = parser.parse_args(args)
 
@@ -1336,11 +1373,12 @@ def main(args):
     else:
         raise ValueError
     mels = '_mel64' if args.mels == 64 else '_mel128'
+    rir = '_rir' if args.use_rir_augmentation else ''
 
-    train_synth_json = f'./data/train{sr}{mels}/data_synthetic.json'
-    train_weak_json = f'./data/train{sr}{mels}/data_weak.json'
-    train_unlabel_json = f'./data/train{sr}{mels}/data_unlabel_in_domain.json'
-    valid_json = f'./data/validation{sr}{mels}/data_validation.json'
+    train_synth_json = f'./data/train{sr}{mels}{rir}/data_synthetic.json'
+    train_weak_json = f'./data/train{sr}{mels}{rir}/data_weak.json'
+    train_unlabel_json = f'./data/train{sr}{mels}{rir}/data_unlabel_in_domain.json'
+    valid_json = f'./data/validation{sr}{mels}{rir}/data_validation.json'
 
     synth_df = pd.read_csv(args.synth_meta, header=0, sep="\t")
     validation_df = pd.read_csv(args.valid_meta, header=0, sep="\t")
@@ -1356,8 +1394,8 @@ def main(args):
         valid_json = json.load(valid_json)['utts']
 
     # transform functions for data loader
-    if os.path.exists(f"sf{sr}{mels}.pickle"):
-        with open(f"sf{sr}{mels}.pickle", "rb") as f:
+    if os.path.exists(f"sf{sr}{mels}{rir}.pickle"):
+        with open(f"sf{sr}{mels}{rir}.pickle", "rb") as f:
             scaling_factor = pickle.load(f)
     else:
         train_synth_dataset = SEDDataset(train_synth_json,
@@ -1378,7 +1416,7 @@ def main(args):
         scaling_factor = get_scaling_factor([train_synth_dataset,
                                             train_weak_dataset,
                                             train_unlabel_dataset],
-                                            f"sf{sr}{mels}.pickle")
+                                            f"sf{sr}{mels}{rir}.pickle")
     scaling = Normalize(mean=scaling_factor["mean"], std=scaling_factor["std"])
     
     if args.use_specaugment:
@@ -1413,6 +1451,9 @@ def main(args):
     train_transforms_ema = [ApplyLog(), scaling, GaussianNoise()]
     test_transforms = [ApplyLog(), scaling]
     
+    if args.ssl:
+        train_transforms.append(GaussianNoise())
+    
     train_synth_dataset = SEDDataset(train_synth_json,
                                      label_type='strong',
                                      sequence_length=args.n_frames,
@@ -1429,31 +1470,22 @@ def main(args):
                                            transforms=train_transforms,
                                            pooling_time_ratio=args.pooling_time_ratio)
         
-    train_synth_dataset_ema = SEDDataset(train_synth_json,
-                                         label_type='strong',
-                                         sequence_length=args.n_frames,
-                                         transforms=train_transforms_ema,
-                                         pooling_time_ratio=args.pooling_time_ratio)
-    train_weak_dataset_ema = SEDDataset(train_weak_json,
-                                        label_type='weak',
-                                        sequence_length=args.n_frames,
-                                        transforms=train_transforms_ema,
-                                        pooling_time_ratio=args.pooling_time_ratio)
-    train_unlabel_dataset_ema = SEDDataset(train_unlabel_json,
-                                           label_type='unlabel',
-                                           sequence_length=args.n_frames,
-                                           transforms=train_transforms_ema,
-                                           pooling_time_ratio=args.pooling_time_ratio)
-
-
-    if os.path.exists(f"sf{sr}{mels}.pickle"):
-        with open(f"sf{sr}{mels}.pickle", "rb") as f:
-            scaling_factor = pickle.load(f)
-    else:
-        scaling_factor = get_scaling_factor([train_synth_dataset,
-                                            train_weak_dataset,
-                                            train_unlabel_dataset],
-                                            f"sf{sr}{mels}.pickle")
+    if args.ssl:
+        train_synth_dataset = SEDDatasetEMA(train_synth_json,
+                                             label_type='strong',
+                                             sequence_length=args.n_frames,
+                                             transforms=train_transforms,
+                                             pooling_time_ratio=args.pooling_time_ratio)
+        train_weak_dataset = SEDDatasetEMA(train_weak_json,
+                                            label_type='weak',
+                                            sequence_length=args.n_frames,
+                                            transforms=train_transforms,
+                                            pooling_time_ratio=args.pooling_time_ratio)
+        train_unlabel_dataset = SEDDatasetEMA(train_unlabel_json,
+                                               label_type='unlabel',
+                                               sequence_length=args.n_frames,
+                                               transforms=train_transforms,
+                                               pooling_time_ratio=args.pooling_time_ratio)
 
     valid_dataset = SEDDataset(valid_json,
                                    label_type='strong',
@@ -1462,14 +1494,14 @@ def main(args):
                                    pooling_time_ratio=args.pooling_time_ratio,
                                    time_shift=False)
 
-    train_synth_loader = DataLoader(train_synth_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
-    train_weak_loader = DataLoader(train_weak_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
-    train_unlabel_loader = DataLoader(train_unlabel_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
+    train_synth_loader = DataLoader(train_synth_dataset, batch_size=args.batch_size, shuffle=True, drop_last=False)
+    train_weak_loader = DataLoader(train_weak_dataset, batch_size=args.batch_size, shuffle=True, drop_last=False)
+    train_unlabel_loader = DataLoader(train_unlabel_dataset, batch_size=args.batch_size*2, shuffle=True, drop_last=False)
     
     
-    train_synth_loader_ema = DataLoader(train_synth_dataset_ema, batch_size=args.batch_size, shuffle=False, drop_last=True)
-    train_weak_loader_ema = DataLoader(train_weak_dataset_ema, batch_size=args.batch_size, shuffle=False, drop_last=True)
-    train_unlabel_loader_ema = DataLoader(train_unlabel_dataset_ema, batch_size=args.batch_size, shuffle=False, drop_last=True)
+#     train_synth_loader_ema = DataLoader(train_synth_dataset_ema, batch_size=args.batch_size, shuffle=False, drop_last=True)
+#     train_weak_loader_ema = DataLoader(train_weak_dataset_ema, batch_size=args.batch_size, shuffle=False, drop_last=True)
+#     train_unlabel_loader_ema = DataLoader(train_unlabel_dataset_ema, batch_size=args.batch_size, shuffle=False, drop_last=True)
     
     valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False)
 
@@ -1585,6 +1617,10 @@ def main(args):
                                'args'      : '',
                                "kwargs"    : crnn_kwargs,
                                'state_dict': crnn.state_dict()},
+        'ema_model'         : {"name"      : crnn.__class__.__name__,
+                               'args'      : '',
+                               "kwargs"    : crnn_kwargs,
+                               'state_dict': crnn_ema.state_dict()},
         'optimizer'         : {"name"      : optimizer.__class__.__name__,
                                'args'      : '',
                                "kwargs"    : optim_kwargs,
@@ -1617,16 +1653,33 @@ def main(args):
         if args.epochs == 0:
             logging.info('Use iterations mode, total itarations equals to {:.2f} epochs.'.format(
                 args.iterations / len(train_synth_loader)))
-            train_one_step(train_synth_loader, train_weak_loader, crnn, optimizer, logger, args.loss_function,
-                           iterations=args.iterations,
-                           log_interval=len(train_synth_loader),
-                           valid_loader=valid_loader,
-                           validation_df=validation_df,
-                           args=args,
-                           many_hot_encoder=many_hot_encoder,
-                           exp_name=exp_name,
-                           state=state,
-                           save_best_eb=save_best_eb)
+            
+            if args.ssl:
+                train_one_step_ema(train_synth_loader, train_weak_loader, train_unlabel_loader,
+                                   crnn, crnn_ema, optimizer, logger,
+                                   loss_function='BCE',
+                                   iterations=args.iterations,
+                                   log_interval=args.log_interval,
+                                   valid_loader=valid_loader,
+                                   validation_df=validation_df,
+                                   many_hot_encoder=many_hot_encoder,
+                                   args=args,
+                                   exp_name=exp_name,
+                                   state=state,
+                                   save_best_eb=save_best_eb,
+                                   lr_scheduler=None,
+                                   warm_start=False)
+            else:
+                train_one_step(train_synth_loader, train_weak_loader, crnn, optimizer, logger, args.loss_function,
+                               iterations=args.iterations,
+                               log_interval=len(train_synth_loader),
+                               valid_loader=valid_loader,
+                               validation_df=validation_df,
+                               args=args,
+                               many_hot_encoder=many_hot_encoder,
+                               exp_name=exp_name,
+                               state=state,
+                               save_best_eb=save_best_eb)
 
     #         train_one_step_ema(train_synth_loader, train_weak_loader, train_unlabel_loader,
     #                            train_synth_loader_ema, train_weak_loader_ema, train_unlabel_loader_ema,
@@ -1730,7 +1783,8 @@ def main(args):
                     state['epoch'] = epoch + 1
                     state['valid_metric'] = valid_events_metric.results()
                     torch.save(state, os.path.join(exp_name, 'model', f'epoch_{epoch + 1}.pth'))
-                    if save_best_eb.apply(global_valid):
+#                     if save_best_eb.apply(macro_f1):
+                    if save_best_eb.apply(macro_f1):
                         best_event_epoch = epoch + 1
                         best_event_f1 = global_valid
                         model_fname = os.path.join(exp_name, 'model', "best.pth")

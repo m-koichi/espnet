@@ -110,6 +110,73 @@ class SEDDataset(Dataset):
 
     def __len__(self):
         return len(self.json_data)
+    
+    
+class SEDDatasetEMA(Dataset):
+    '''Sound Event Detection
+    '''
+    def __init__(self, json_data, label_type, sequence_length, pooling_time_ratio=1, transforms=None,
+                 time_shift=True):
+        # self.batchset = batchset
+        self.json_data = json_data
+        self.label_type = label_type
+        self.sequence_length = sequence_length
+        self.data_ids = [k for k in self.json_data.keys()]
+        self.transforms = transforms
+        self.pooling_time_ratio = pooling_time_ratio
+        self.time_shift = time_shift
+        
+    def __getitem__(self, index):
+        data_id = self.data_ids[index]
+        x1 = kaldiio.load_mat(self.json_data[data_id]['input'][0]['feats'])
+        x2 = kaldiio.load_mat(self.json_data[data_id]['input'][0]['feats'])
+
+        # x_ = np.load(os.path.join('./DCASE2019_task4/dataset/features/sr44100_win2048_hop511_mels64_nolog/features', re.sub('^.*?-', '', data_id + '.npy')))
+
+        if self.label_type == 'strong':
+            output = self.json_data[data_id]['output'][0]
+            y = np.zeros((output['label'][0]['shape'][1], len(output['label'])))
+            for label_idx, label in enumerate(output['label']):
+                y[:, label_idx] = np.array(label['tokenid'])
+                
+            if self.transforms:
+                for transform in self.transforms:
+                    if transform.__class__.__name__ == 'TimeShift':
+                        x1, y = transform(x1, y)
+                        x2, y = transform(x2, y)
+                    else:
+                        x1 = transform(x1)
+                        x2 = transform(x2)
+            x1 = pad_trunc_sequence(x1, self.sequence_length)
+            x2 = pad_trunc_sequence(x2, self.sequence_length)
+            y = y[self.pooling_time_ratio-1::self.pooling_time_ratio, :]
+                # x, y = TimeShift()(x, y)
+            assert x1.shape[0] == y.shape[0] * self.pooling_time_ratio, \
+                f'mismatch shape x.shape[0]={x1.shape[0]} and y.shape[0]={y.shape[0]}'
+        elif self.label_type == 'weak':
+            if self.transforms:
+                for transform in self.transforms:
+                    x1 = transform(x1)
+                    x2 = transform(x2)
+            x1 = pad_trunc_sequence(x1, self.sequence_length)
+            x2 = pad_trunc_sequence(x2, self.sequence_length)
+            output = self.json_data[data_id]['output'][0]
+            y = np.array(output['label']['tokenid'])
+        elif self.label_type == 'unlabel':
+            if self.transforms:
+                for transform in self.transforms:
+                    x1 = transform(x1)
+                    x2 = transform(x2)
+            x1 = pad_trunc_sequence(x1, self.sequence_length)
+            x2 = pad_trunc_sequence(x2, self.sequence_length)
+            y = np.array([-1])
+        else:
+            raise ValueError(f'label_type "{self.label_type}" is not suported.')
+
+        return torch.from_numpy(x1).float().unsqueeze(0), torch.from_numpy(x2).float().unsqueeze(0), torch.from_numpy(y).float(), data_id
+
+    def __len__(self):
+        return len(self.json_data)
 
     #         if len(inp['label']) != 1:
     #                     x = np.zeros((len(inp['label']), inp['label'][0]['shape'][1]))
@@ -184,6 +251,64 @@ class SEDDatasetTrans(Dataset):
         
 #         mat_to_img(x.T, dest=f'img/weak_logmel/{data_id}')
         return torch.from_numpy(x).float().unsqueeze(0), torch.from_numpy(y).float(), data_id, mask
+
+    def __len__(self):
+        return len(self.json_data)
+    
+    
+class SEDDatasetTransEMA(Dataset):
+    '''Sound Event Detection
+    '''
+    def __init__(self, json_data, label_type, sequence_length, pooling_time_ratio=1, transforms=None,
+                 time_shift=True):
+        # self.batchset = batchset
+        self.json_data = json_data
+        self.label_type = label_type
+        self.sequence_length = sequence_length
+        self.data_ids = [k for k in self.json_data.keys()]
+        self.transforms = transforms
+        self.pooling_time_ratio = pooling_time_ratio
+        self.time_shift = time_shift
+        
+    def __getitem__(self, index):
+        data_id = self.data_ids[index]
+        x1 = kaldiio.load_mat(self.json_data[data_id]['input'][0]['feats'])
+        x2 = kaldiio.load_mat(self.json_data[data_id]['input'][0]['feats'])
+
+        # x_ = np.load(os.path.join('./DCASE2019_task4/dataset/features/sr44100_win2048_hop511_mels64_nolog/features', re.sub('^.*?-', '', data_id + '.npy')))
+
+        if self.transforms:
+            for transform in self.transforms:
+                # pdb.set_trace()
+                x1 = transform(x1)
+                x2 = transform(x2)
+        x1, mask = pad_trunc_sequence_mask(x1, self.sequence_length)
+        x2, mask = pad_trunc_sequence_mask(x2, self.sequence_length)
+
+        if self.label_type == 'strong':
+            output = self.json_data[data_id]['output'][0]
+            y = np.zeros((output['label'][0]['shape'][1], len(output['label'])))
+            for label_idx, label in enumerate(output['label']):
+                y[:, label_idx] = np.array(label['tokenid'])
+            # pdb.set_trace()
+            y = y[self.pooling_time_ratio-1::self.pooling_time_ratio, :]
+            # if self.time_shift:
+                # import ipdb
+#             ipdb.set_trace()
+                # x, y = TimeShift()(x, y)
+#             y[0,:] = 0
+            assert x1.shape[0] == y.shape[0] * self.pooling_time_ratio, \
+                f'mismatch shape x.shape[0]={x1.shape[0]} and y.shape[0]={y.shape[0]}'
+        elif self.label_type == 'weak':
+            output = self.json_data[data_id]['output'][0]
+            y = np.array(output['label']['tokenid'])
+        elif self.label_type == 'unlabel':
+            y = np.array([-1])
+        else:
+            raise ValueError(f'label_type "{self.label_type}" is not suported.')
+        
+#         mat_to_img(x.T, dest=f'img/weak_logmel/{data_id}')
+        return torch.from_numpy(x1).float().unsqueeze(0), torch.from_numpy(x2).float().unsqueeze(0), torch.from_numpy(y).float(), data_id, mask
 
     def __len__(self):
         return len(self.json_data)

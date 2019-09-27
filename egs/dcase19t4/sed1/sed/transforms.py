@@ -16,12 +16,12 @@ class Normalize(object):
         if self.mean is not None and self.std is not None:
             return (data - self.mean) / self.std
         else:
-            # return (data - data.mean(axis=0)) / data.std(axis=0)
-            return (data - data.mean()) / data.std()
+            return (data - data.mean(axis=0)) / data.std(axis=0)
+#             return (data - data.mean()) / data.std()
 
 
 class GaussianNoise:
-    def __init__(self, mean=0, std=0.015):
+    def __init__(self, mean=0, std=0.15):
         self.mean = mean
         self.std = std
 

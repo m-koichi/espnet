@@ -31,6 +31,7 @@ from utils.utils import AverageMeterSet, weights_init, ManyHotEncoder, SaveBest
 from evaluation_measures import compute_strong_metrics, segment_based_evaluation_df
 
 from dataset import SEDDatasetTrans as SEDDataset
+from dataset import SEDDatasetTransEMA as SEDDatasetEMA
 from transforms import Normalize, ApplyLog, GaussianNoise, TimeWarp, FrequencyMask, TimeMask, Gain, SpecAugment
 from solver.mcd import MCDSolver
 # from solver.CNN import CNN
@@ -109,7 +110,7 @@ def get_scaling_factor(datasets, save_pickle_path):
     for dataset in datasets:
         dataloader = DataLoader(dataset, batch_size=1)
 
-        for x, _, _ in dataloader:
+        for x, _, _, _ in dataloader:
             if len(scaling_factor) == 0:
                 scaling_factor["mean"] = np.zeros(x.size(-1))
                 scaling_factor["std"] = np.zeros(x.size(-1))
@@ -126,15 +127,16 @@ def get_scaling_factor(datasets, save_pickle_path):
 
 
 def train(solver, validation_loader, validation_df, decoder, args, exp_name, iteration=1000, log_interval=100,
-          save_best_eb=None, train_loader=None, train_df=None, mode='SED'):
+          save_best_eb=None, train_loader=None, train_df=None, mode='SED', target='Frame'):
     for i in tqdm(range(1, iteration + 1)):
 
         best_f1 = 0
         best_iterations = 0
-        if mode == 'SED':
+        if args.ssl:
+            solver.train_one_step_ema(warm_start=args.warm_start)
+        else:
             solver.train_one_step(warm_start=args.warm_start)
-        elif mode =='AT':
-            solver.train_one_step_at(warm_start=args.warm_start)
+            
         if i % log_interval == 0 and i >= args.transformer_warmup_steps:
             
             sample_rate, hop_length = get_sample_rate_and_hop_length(args)
@@ -176,7 +178,11 @@ def train(solver, validation_loader, validation_df, decoder, args, exp_name, ite
                 f.write(str(valid_events_metric))
                 f.write(str(valid_segments_metric))
 
-            if save_best_eb.apply(global_valid):
+            if target == 'Frame':
+                performance = macro_f1
+            elif target == 'Event':
+                performance = global_valid
+            if save_best_eb.apply(performance):
                 best_iterations = i
                 best_f1 = global_valid
                 best_event_iter = i
@@ -350,6 +356,10 @@ def main(args):
     # Decoder
     parser.add_argument('--after-conv', default=False, type= strtobool,
                         help='insert conv layer after each encoder block')
+    parser.add_argument('--scaling', default=True, type= strtobool,
+                        help='use scaling factor extracted by training dataset')
+    parser.add_argument('--ssl', default=False, type= strtobool,
+                        help='use scaling factor extracted by training dataset')
     
 
     args = parser.parse_args(args)
@@ -357,7 +367,7 @@ def main(args):
     if args.input_layer_type == 1:
         args.transformer_input_layer = 'linear'
     elif args.input_layer_type == 2:
-        args.transformer_input_layer = 'conv2d'
+        args.transformer_input_layer = 'linear'
     elif args.input_layer_type == 3:
         args.transformer_input_layer = 'linear'
     elif args.input_layer_type == 4:
@@ -384,11 +394,12 @@ def main(args):
 
     sr = '_16k' if args.n_frames == 496 else '_44k'
     mels = '_mel64' if args.mels == 64 else '_mel128'
+    rir = '_rir' if args.use_rir_augmentation else ''
 
-    train_synth_json = f'./data/train{sr}{mels}/data_synthetic.json'
-    train_weak_json = f'./data/train{sr}{mels}/data_weak.json'
-    train_unlabel_json = f'./data/train{sr}{mels}/data_unlabel_in_domain.json'
-    valid_json = f'./data/validation{sr}{mels}/data_validation.json'
+    train_synth_json = f'./data/train{sr}{mels}{rir}/data_synthetic.json'
+    train_weak_json = f'./data/train{sr}{mels}{rir}/data_weak.json'
+    train_unlabel_json = f'./data/train{sr}{mels}{rir}/data_unlabel_in_domain.json'
+    valid_json = f'./data/validation{sr}{mels}{rir}/data_validation.json'
 
     synth_df = pd.read_csv(args.synth_meta, header=0, sep="\t")
     validation_df = pd.read_csv(args.valid_meta, header=0, sep="\t")
@@ -419,8 +430,8 @@ def main(args):
 # transform functions for data loader
 
 
-    if os.path.exists(f"sf{sr}{mels}.pickle"):
-        with open(f"sf{sr}{mels}.pickle", "rb") as f:
+    if os.path.exists(f"sf{sr}{mels}{rir}.pickle"):
+        with open(f"sf{sr}{mels}{rir}.pickle", "rb") as f:
             scaling_factor = pickle.load(f)
     else:
         train_synth_dataset = SEDDataset(train_synth_json,
@@ -441,12 +452,15 @@ def main(args):
         scaling_factor = get_scaling_factor([train_synth_dataset,
                                             train_weak_dataset,
                                             train_unlabel_dataset],
-                                            f"sf{sr}{mels}.pickle")
-    scaling = Normalize(mean=scaling_factor["mean"], std=scaling_factor["std"])
+                                            f"sf{sr}{mels}{rir}.pickle")
+    if args.scaling:
+        scaling = Normalize(mean=scaling_factor["mean"], std=scaling_factor["std"])
+    else:
+        scaling = Normalize()
     if args.use_specaugment:
         # train_transforms = [Normalize(), TimeWarp(), FrequencyMask(), TimeMask()]
         if args.log_mels:
-            train_transforms = [ApplyLog(), scaling, SpecAugment()]
+            train_transforms = [ApplyLog(), scaling, Gain(), FrequencyMask()]
             test_transforms = [ApplyLog(), scaling]
         else:
             train_transforms = [scaling, FrequencyMask()]
@@ -458,29 +472,53 @@ def main(args):
         else:
             train_transforms = [scaling]
             test_transforms = [scaling]
+            
+#     if args.add_noise:
+#         train_transforms.append(GaussianNoise())
+#         test_transforms.append(GaussianNoise())
+#     if args.use_specaugment:
+#         train_transforms.append(FrequencyMask())
+#         test_transforms.append(FrequencyMask())
 
 #     unsupervised_transforms = [TimeShift(), FrequencyShift()]
-    train_synth_dataset = SEDDataset(train_synth_json,
-                                         label_type='strong',
-                                         sequence_length=args.n_frames,
-                                         transforms=train_transforms,
-                                         pooling_time_ratio=args.pooling_time_ratio)
-    train_weak_dataset = SEDDataset(train_weak_json,
-                                        label_type='weak',
-                                        sequence_length=args.n_frames,
-                                        transforms=train_transforms,
-                                        pooling_time_ratio=args.pooling_time_ratio)
-    train_unlabel_dataset = SEDDataset(train_unlabel_json,
-                                           label_type='unlabel',
-                                           sequence_length=args.n_frames,
-                                           transforms=train_transforms,
-                                           pooling_time_ratio=args.pooling_time_ratio)
+    if args.ssl:
+        train_synth_dataset = SEDDatasetEMA(train_synth_json,
+                                             label_type='strong',
+                                             sequence_length=args.n_frames,
+                                             transforms=train_transforms,
+                                             pooling_time_ratio=args.pooling_time_ratio)
+        train_weak_dataset = SEDDatasetEMA(train_weak_json,
+                                            label_type='weak',
+                                            sequence_length=args.n_frames,
+                                            transforms=train_transforms,
+                                            pooling_time_ratio=args.pooling_time_ratio)
+        train_unlabel_dataset = SEDDatasetEMA(train_unlabel_json,
+                                               label_type='unlabel',
+                                               sequence_length=args.n_frames,
+                                               transforms=train_transforms,
+                                               pooling_time_ratio=args.pooling_time_ratio)
+    else:
+        train_synth_dataset = SEDDataset(train_synth_json,
+                                             label_type='strong',
+                                             sequence_length=args.n_frames,
+                                             transforms=train_transforms,
+                                             pooling_time_ratio=args.pooling_time_ratio)
+        train_weak_dataset = SEDDataset(train_weak_json,
+                                            label_type='weak',
+                                            sequence_length=args.n_frames,
+                                            transforms=train_transforms,
+                                            pooling_time_ratio=args.pooling_time_ratio)
+        train_unlabel_dataset = SEDDataset(train_unlabel_json,
+                                               label_type='unlabel',
+                                               sequence_length=args.n_frames,
+                                               transforms=train_transforms,
+                                               pooling_time_ratio=args.pooling_time_ratio)
 
     valid_dataset = SEDDataset(valid_json,
-                                   label_type='strong',
-                                   sequence_length=args.n_frames,
-                                   transforms=test_transforms,
-                                   pooling_time_ratio=args.pooling_time_ratio)
+                                       label_type='strong',
+                                       sequence_length=args.n_frames,
+                                       transforms=test_transforms,
+                                       pooling_time_ratio=args.pooling_time_ratio)
         
     if args.ngpu > 1:
         args.batch_size *= args.ngpu
@@ -489,7 +527,7 @@ def main(args):
                                     drop_last=True)
     train_weak_loader = DataLoader(train_weak_dataset, batch_size=args.batch_size, shuffle=True, num_workers=8,
                                    drop_last=True)
-    train_unlabel_loader = DataLoader(train_unlabel_dataset, batch_size=args.batch_size, shuffle=True, num_workers=8,
+    train_unlabel_loader = DataLoader(train_unlabel_dataset, batch_size=args.batch_size*2, shuffle=True, num_workers=8,
                                       drop_last=True)
     valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False, num_workers=8)
 
@@ -560,13 +598,14 @@ def main(args):
                             cnn_kwargs=cnn_kwargs,
                             classifier=args.classifier)
     elif args.input_layer_type == 2:
-        assert args.transformer_input_layer == 'conv2d'
+        assert args.transformer_input_layer == 'linear'
         model = Transformer(input_dim=args.mels,
                             n_class=10,
                             args=args,
                             pooling=args.pooling_operator,
-                            input_conv=False,
-                            cnn_kwargs=None)
+                            input_conv=True,
+                            cnn_kwargs=None,
+                            classifier=args.classifier)
     elif args.input_layer_type == 3:
         assert args.transformer_input_layer == 'linear'
         model = Transformer(input_dim=args.mels,
@@ -604,15 +643,17 @@ def main(args):
                                 pooling=args.pooling_operator,
                                 input_conv=True,
                                 cnn_kwargs=cnn_kwargs,
-                                pos_enc=False)
+                                classifier=args.classifier,
+                                pos_enc=True)
     elif args.input_layer_type == 2:
-        assert args.transformer_input_layer == 'conv2d'
+        assert args.transformer_input_layer == 'linear'
         ema_model = Transformer(input_dim=args.mels,
                                 n_class=10,
                                 args=args,
                                 pooling=args.pooling_operator,
                                 input_conv=False,
-                                cnn_kwargs=None)
+                                cnn_kwargs=None,
+                                classifier=args.classifier)
     elif args.input_layer_type == 3:
         assert args.transformer_input_layer == 'linear'
         ema_model = Transformer(input_dim=args.mels,
@@ -621,7 +662,8 @@ def main(args):
                                 pooling=args.pooling_operator,
                                 input_conv=False,
                                 cnn_kwargs=None,
-                                pos_enc=False)
+                                classifier=args.classifier,
+                                pos_enc=True)
     elif args.input_layer_type == 4:
         assert args.transformer_input_layer == 'linear'
         ema_model = Transformer(input_dim=args.mels,
