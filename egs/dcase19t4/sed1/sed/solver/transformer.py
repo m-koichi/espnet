@@ -5,6 +5,7 @@ from espnet.nets.pytorch_backend.transformer.decoder import Decoder
 from espnet.nets.pytorch_backend.transformer.layer_norm import LayerNorm
 from espnet.nets.pytorch_backend.transformer.optimizer import get_std_opt
 
+from solver.subsampling import Conv2dSubsampling
 from espnet.nets.pytorch_backend.transformer.label_smoothing_loss import LabelSmoothingLoss
 from dcase_util.data import ProbabilityEncoder
 from utils.utils import AverageMeter, weights_init, ManyHotEncoder, SaveBest
@@ -78,10 +79,11 @@ class Transformer(torch.nn.Module):
         self.pooling = pooling
         self.input_conv = input_conv
         if input_conv:
-            self.cnn = CNN(n_in_channel=1, activation="Relu", conv_dropout=args.dropout, **cnn_kwargs)
-            if cnn_pretrained:
-                self.cnn.load(hogehoge)
-                # TODO freeze weight
+            if self.args.input_layer_type == 1:
+                self.cnn = CNN(n_in_channel=1, activation="Relu", conv_dropout=args.dropout, **cnn_kwargs)
+            if self.args.input_layer_type == 2:
+                self.cnn = Conv2dSubsampling(idim=args.mels, odim=args.mels)
+
         self.encoder = Encoder(input_dim, args, pos_enc=pos_enc)
         if classifier == 'linear':
             self.classifier = torch.nn.Linear(args.adim, n_class)
@@ -102,17 +104,16 @@ class Transformer(torch.nn.Module):
                               )
         elif classifier == 'transformer':
             self.pooling = 'transformer'
-            self.rnn = torch.nn.Sequential(
-                                BidirectionalGRU(args.mels, args.adim//2, dropout=args.dropout, num_layers=2),
-                                torch.nn.Linear(args.adim, args.adim)
-                              )
             self.classifier = torch.nn.Sequential(
-                        torch.nn.Linear(args.adim, n_class),
-                        torch.nn.Sigmoid()
+                        torch.nn.Linear(args.adim, n_class)
                     )
             self.weak_classifier = torch.nn.Sequential(
-                        torch.nn.Linear(args.adim, n_class),
-                        torch.nn.Sigmoid()
+                        torch.nn.Linear(args.adim, n_class)
+                    )
+        elif classifier == 'transformer2':
+            self.pooling = 'transformer2'
+            self.classifier = torch.nn.Sequential(
+                        torch.nn.Linear(args.adim, n_class)
                     )
         else:
             ValueError
@@ -125,9 +126,11 @@ class Transformer(torch.nn.Module):
         print(f'transformer structure; \n\t input_conv:{input_conv} \n\t classifier:{classifier}')
         
     def forward(self, x, mask=None):
-        if self.input_conv:
+        if self.args.input_layer_type == 1:
             x = self.cnn(x)
             x = x.squeeze(-1).permute(0, 2, 1)
+        if self.args.input_layer_type == 2:
+            x, _ = self.cnn(x, None)
 
         if self.args.input_layer_type == 3:
             x = x.squeeze(1)
@@ -136,32 +139,44 @@ class Transformer(torch.nn.Module):
         elif self.args.input_layer_type == 4:
             x = self.rnn(x)
             x[:, 0, :] = 1
+        if self.pooling == 'transformer' or self.pooling == 'transformer2':
+            mask = None
+            class_frame = torch.ones(x.size(0), 1, x.size(2)).cuda() * 0.2
+            x = torch.cat([class_frame, x], dim=1)
+#             x[:, 0, :] = 1 # replace first frame to one vector
         
         # Encoder
-        x, x_mask = self.encoder(x, mask)
+        x, x_mask = self.encoder(x, mask)            
         
-#         # Decoder
-#         elif self.pooling == 'transformer':
-#             weak = torch.sigmoid(self.weak_classifier(x[:, 0, :]))
-#             strong = torch.sigmoid(self.classifier(x[:, 1:, :]))
-#             return strong, weak
-            
         
-        strong = torch.sigmoid(self.classifier(x))
         if self.pooling == 'attention':
+            strong = torch.sigmoid(self.classifier(x))
             sof = self.dense(x)  # [bs, frames, nclass]
             sof = self.softmax(sof)
             sof = torch.clamp(sof, min=1e-7, max=1)
             weak = (strong * sof).sum(1) / sof.sum(1)  # [bs, nclass]
         elif self.pooling == 'mean':
+            strong = torch.sigmoid(self.classifier(x))
             weak = strong.mean(1)
         elif self.pooling == 'max':
+            strong = torch.sigmoid(self.classifier(x))
             weak = strong.max(1)[0]
         elif self.pooling == 'test':
+            strong = torch.sigmoid(self.classifier(x))
             weak = torch.sigmoid(self.weak_classifier(x[:, 0, :]))
             strong[:, 0, :] = 0
         elif self.pooling == 'dense':
+            strong = torch.sigmoid(self.classifier(x))
             weak = torch.sigmoid(self.weak_classifier(x.view(-1, x.size(1) * x.size(2))))
+        elif self.pooling == 'transformer':
+            strong = torch.sigmoid(self.classifier(x[:, 1:, :]))
+            first_frame = x[:, 0, :]
+            weak = torch.sigmoid(self.weak_classifier(first_frame))
+        elif self.pooling == 'transformer2':
+            x = torch.sigmoid(self.classifier(x))
+            strong = x[:, 1:, :]
+            weak = x[:, 0, :]
+            
         return strong, weak
 
     
@@ -228,9 +243,9 @@ class TransformerSolver(object):
                  exp_name='tensorboard/log',
                  optimizer='noam',
                  consistency_cost=2,
-                 data_parallel=True,
-                writer=None,
-                mode='SED'):
+                 data_parallel=False,
+                 writer=None,
+                 mode='SED'):
         self.model = model.cuda() if torch.cuda.is_available() else model
         self.ema_model = ema_model.cuda() if torch.cuda.is_available() else ema_model
         if data_parallel:
@@ -429,32 +444,38 @@ class TransformerSolver(object):
 
     def train_one_step_ema(self, log_interbal=100, warm_start=True):
         self.model.train()
-        try:
-            strong_sample, strong_target, strong_ids = next(self.strong_iter)
-            strong_sample_ema, strong_target_ema, strong_ids_ema = next(self.strong_iter_ema)
-        except:
-            self.strong_iter = iter(self.strong_loader)
-            strong_sample, strong_target, strong_ids = next(self.strong_iter)
-            self.strong_iter_ema = iter(self.strong_loader)
-            strong_sample_ema, strong_target_ema, strong_ids_ema = next(self.strong_iter_ema)
-        try:
-            weak_sample, weak_target, _ = next(self.weak_iter)
-            weak_sample_ema, weak_target_ema, _ = next(self.weak_iter_ema)
-        except:
-            self.weak_iter = iter(self.weak_loader)
-            weak_sample, weak_target, _ = next(self.weak_iter)
-            self.weak_iter_ema = iter(self.weak_loader)
-            weak_sample_ema, weak_target_ema, _ = next(self.weak_iter_ema)
-        try:
-            unlabel_sample, _, _ = next(self.unlabel_iter)
-            unlabel_sample_ema, _, _ = next(self.unlabel_iter_ema)
-        except:
-            self.unlabel_iter = iter(self.unlabel_loader)
-            unlabel_sample, _, _ = next(self.unlabel_iter)
-            self.unlabel_iter_ema = iter(self.unlabel_loader)
-            unlabel_sample_ema, _, _ = next(self.unlabel_iter_ema)
+        self.ema_model.train()
+        
+        strong_sample, strong_sample_ema, strong_target, _, strong_mask = next(self.strong_iter)
+        weak_sample, weak_sample_ema, weak_target, _, weak_mask = next(self.weak_iter)
+        unlabel_sample, unlabel_sample_ema, _, _, unlabel_mask = next(self.unlabel_iter)
+        
+#         try:
+#             strong_sample, strong_target, strong_ids = next(self.strong_iter)
+#             strong_sample_ema, strong_target_ema, strong_ids_ema = next(self.strong_iter_ema)
+#         except:
+#             self.strong_iter = iter(self.strong_loader)
+#             strong_sample, strong_target, strong_ids = next(self.strong_iter)
+#             self.strong_iter_ema = iter(self.strong_loader)
+#             strong_sample_ema, strong_target_ema, strong_ids_ema = next(self.strong_iter_ema)
+#         try:
+#             weak_sample, weak_target, _ = next(self.weak_iter)
+#             weak_sample_ema, weak_target_ema, _ = next(self.weak_iter_ema)
+#         except:
+#             self.weak_iter = iter(self.weak_loader)
+#             weak_sample, weak_target, _ = next(self.weak_iter)
+#             self.weak_iter_ema = iter(self.weak_loader)
+#             weak_sample_ema, weak_target_ema, _ = next(self.weak_iter_ema)
+#         try:
+#             unlabel_sample, _, _ = next(self.unlabel_iter)
+#             unlabel_sample_ema, _, _ = next(self.unlabel_iter_ema)
+#         except:
+#             self.unlabel_iter = iter(self.unlabel_loader)
+#             unlabel_sample, _, _ = next(self.unlabel_iter)
+#             self.unlabel_iter_ema = iter(self.unlabel_loader)
+#             unlabel_sample_ema, _, _ = next(self.unlabel_iter_ema)
 
-        assert strong_ids == strong_ids_ema
+#         assert strong_ids == strong_ids_ema
 
 
         if self.forward_count < self.rampup_length:
@@ -465,8 +486,8 @@ class TransformerSolver(object):
         strong_sample, strong_sample_ema = strong_sample.cuda(), strong_sample_ema.cuda()
         weak_sample, weak_sample_ema = weak_sample.cuda(), weak_sample_ema.cuda()
         unlabel_sample, unlabel_sample_ema = unlabel_sample.cuda(), unlabel_sample_ema.cuda()
-        strong_target, strong_target_ema = strong_target.cuda(), strong_target_ema.cuda()
-        weak_target, weak_target_ema = weak_target.cuda(), weak_target_ema.cuda()
+        strong_target = strong_target.cuda()
+        weak_target = weak_target.cuda()
 
         # pred_strong, pred_weak = self.model(strong_sample)
         # strong_loss = self.criterion(pred_strong, strong_target)
@@ -475,72 +496,78 @@ class TransformerSolver(object):
         # weak_loss = self.criterion(pred_weak, weak_target)
 
 
-        if warm_start and self.forward_count < self.args.transformer_warmup_steps / 2:
-            pred_strong_ema_w, pred_weak_ema_w = self.ema_model(weak_sample_ema)
-            pred_strong_ema_u, pred_weak_ema_u = self.ema_model(unlabel_sample_ema)
-            pred_strong_ema_w, pred_strong_ema_u = \
-                pred_strong_ema_w.detach(), pred_strong_ema_u.detach()
-            pred_weak_ema_u, pred_weak_ema_w = \
-                pred_weak_ema_w.detach(), pred_weak_ema_u.detach()
-        else:
-            pred_strong_ema_s, pred_weak_ema_s = self.ema_model(strong_sample_ema)
-            pred_strong_ema_w, pred_weak_ema_w = self.ema_model(weak_sample_ema)
-            pred_strong_ema_u, pred_weak_ema_u = self.ema_model(unlabel_sample_ema)
-            pred_strong_ema_s, pred_strong_ema_w, pred_strong_ema_u = \
-                pred_strong_ema_s.detach(), pred_strong_ema_w.detach(), pred_strong_ema_u.detach()
-            pred_weak_ema_s, pred_weak_ema_u, pred_weak_ema_w = \
-                pred_weak_ema_s.detach(), pred_weak_ema_w.detach(), pred_weak_ema_u.detach()
+#         if warm_start and self.forward_count < self.args.transformer_warmup_steps / 2:
+#             pred_strong_ema_w, pred_weak_ema_w = self.ema_model(weak_sample_ema)
+#             pred_strong_ema_u, pred_weak_ema_u = self.ema_model(unlabel_sample_ema)
+#             pred_strong_ema_w, pred_strong_ema_u = \
+#                 pred_strong_ema_w.detach(), pred_strong_ema_u.detach()
+#             pred_weak_ema_u, pred_weak_ema_w = \
+#                 pred_weak_ema_w.detach(), pred_weak_ema_u.detach()
+#         else:
+        pred_strong_ema_s, pred_weak_ema_s = self.ema_model(strong_sample_ema)
+        pred_strong_ema_w, pred_weak_ema_w = self.ema_model(weak_sample_ema)
+        pred_strong_ema_u, pred_weak_ema_u = self.ema_model(unlabel_sample_ema)
+        pred_strong_ema_s, pred_strong_ema_w, pred_strong_ema_u = \
+            pred_strong_ema_s.detach(), pred_strong_ema_w.detach(), pred_strong_ema_u.detach()
+        pred_weak_ema_s, pred_weak_ema_w, pred_weak_ema_u = \
+            pred_weak_ema_s.detach(), pred_weak_ema_w.detach(), pred_weak_ema_u.detach()
 
-        if warm_start and self.forward_count < self.args.transformer_warmup_steps / 2:
-            pred_strong_w, pred_weak_w = self.model(weak_sample)
-            pred_strong_u, pred_weak_u = self.model(unlabel_sample)
-            weak_class_loss = self.criterion(pred_weak_w, weak_target)
-        else:
-            pred_strong_s, pred_weak_s = self.model(strong_sample)
-            pred_strong_w, pred_weak_w = self.model(weak_sample)
-            pred_strong_u, pred_weak_u = self.model(unlabel_sample)
-            strong_class_loss = self.criterion(pred_strong_s, strong_target)
-            weak_class_loss = self.criterion(pred_weak_w, weak_target)
+#         if warm_start and self.forward_count < self.args.transformer_warmup_steps / 2:
+#             pred_strong_w, pred_weak_w = self.model(weak_sample)
+#             pred_strong_u, pred_weak_u = self.model(unlabel_sample)
+#             weak_class_loss = self.criterion(pred_weak_w, weak_target)
+#         else:
+
+        pred_strong_s, pred_weak_s = self.model(strong_sample)
+        pred_strong_w, pred_weak_w = self.model(weak_sample)
+        pred_strong_u, pred_weak_u = self.model(unlabel_sample)
+        strong_class_loss = self.strong_criterion(pred_strong_s, strong_target)
+        weak_class_loss = self.weak_criterion(pred_weak_w, weak_target)
 
         # compute consistency loss
         consistency_cost = self.max_consistency_cost * rampup_value
-        if warm_start and self.forward_count < self.args.transformer_warmup_steps / 2:
-            consistency_loss_weak = consistency_cost * self.consistency_criterion(pred_weak_w, pred_weak_ema_w) \
-                                    + consistency_cost * self.consistency_criterion(pred_weak_u, pred_weak_ema_u)
+#         if warm_start and self.forward_count < self.args.transformer_warmup_steps / 2:
+#             consistency_loss_weak = consistency_cost * self.consistency_criterion(pred_weak_w, pred_weak_ema_w) \
+#                                     + consistency_cost * self.consistency_criterion(pred_weak_u, pred_weak_ema_u)
 
-            loss = (
-                           weak_class_loss + consistency_loss_weak) / self.accum_grad
-            loss.backward()  # Backprop
-            loss.detach()  # Truncate the graph
+#             loss = (
+#                            weak_class_loss + consistency_loss_weak) / self.accum_grad
+#             loss.backward()  # Backprop
+#             loss.detach()  # Truncate the graph
 
-            # self.logger.scalar_summary('train_strong_loss', strong_class_loss.item(), self.forward_count)
-            self.logger.scalar_summary('train_weak_loss', weak_class_loss.item(), self.forward_count)
+#             # self.logger.scalar_summary('train_strong_loss', strong_class_loss.item(), self.forward_count)
+#             self.logger.scalar_summary('train_weak_loss', weak_class_loss.item(), self.forward_count)
 
-            self.forward_count += 1
-            if self.forward_count % log_interbal == 0:
-                logging.info('After {} iteration'.format(self.forward_count))
-                # logging.info('\tstrong loss: {}'.format(strong_class_loss.item()))
-                logging.info('\tweak loss: {}'.format(weak_class_loss.item()))
-        else:
-            consistency_loss_strong = consistency_cost * self.consistency_criterion(pred_strong_s, pred_strong_ema_s) \
-                                      + consistency_cost * self.consistency_criterion(pred_strong_w, pred_strong_ema_w) \
-                                      + consistency_cost * self.consistency_criterion(pred_strong_u, pred_strong_ema_u)
-            consistency_loss_weak = consistency_cost * self.consistency_criterion(pred_weak_s, pred_weak_ema_s) \
-                                    + consistency_cost * self.consistency_criterion(pred_weak_w, pred_weak_ema_w) \
-                                    + consistency_cost * self.consistency_criterion(pred_weak_u, pred_weak_ema_u)
+#             self.forward_count += 1
+#             if self.forward_count % log_interbal == 0:
+#                 logging.info('After {} iteration'.format(self.forward_count))
+#                 # logging.info('\tstrong loss: {}'.format(strong_class_loss.item()))
+#                 logging.info('\tweak loss: {}'.format(weak_class_loss.item()))
+#         else:
 
-            loss = (strong_class_loss + weak_class_loss + consistency_loss_strong + consistency_loss_weak) / self.accum_grad
-            loss.backward() # Backprop
-            loss.detach() # Truncate the graph
+        strong_class_ema_loss = self.consistency_criterion(pred_strong_s, pred_strong_ema_s) \
+                                + self.consistency_criterion(pred_strong_w, pred_strong_ema_w) \
+                                + self.consistency_criterion(pred_strong_u, pred_strong_ema_u)
+        weak_class_ema_loss = self.consistency_criterion(pred_weak_s, pred_weak_ema_s) \
+                                + self.consistency_criterion(pred_weak_w, pred_weak_ema_w) \
+                                + self.consistency_criterion(pred_weak_u, pred_weak_ema_u)
+        consistency_loss_strong = consistency_cost * strong_class_ema_loss
+        consistency_loss_weak = consistency_cost * weak_class_ema_loss
 
-            self.logger.scalar_summary('train_strong_loss', strong_class_loss.item(), self.forward_count)
-            self.logger.scalar_summary('train_weak_loss', weak_class_loss.item(), self.forward_count)
+        loss = (strong_class_loss + weak_class_loss + consistency_loss_strong + consistency_loss_weak) / self.accum_grad
+        loss.backward() # Backprop
+        loss.detach() # Truncate the graph
 
-            self.forward_count += 1
-            if self.forward_count % log_interbal == 0:
-                logging.info('After {} iteration'.format(self.forward_count))
-                logging.info('\tstrong loss: {}'.format(strong_class_loss.item()))
-                logging.info('\tweak loss: {}'.format(weak_class_loss.item()))
+        self.logger.scalar_summary('train_strong_loss', strong_class_loss.item(), self.forward_count)
+        self.logger.scalar_summary('train_weak_loss', weak_class_loss.item(), self.forward_count)
+
+        self.forward_count += 1
+        if self.forward_count % log_interbal == 0:
+            logging.info('After {} iteration'.format(self.forward_count))
+            logging.info('\t strong loss: {}'.format(strong_class_loss.item()))
+            logging.info('\t weak loss: {}'.format(weak_class_loss.item()))
+            logging.info('\t consistency loss strong: {}'.format(consistency_loss_strong.item()))
+            logging.info('\t consistency loss weak: {}'.format(consistency_loss_weak.item()))
         if self.forward_count % self.accum_grad != 0:
             return
         # self.forward_count = 0
@@ -576,13 +603,17 @@ class TransformerSolver(object):
         frame_measure = [ConfMat() for i in range(len(CLASSES))]
         tag_measure = ConfMat()
         self.model.eval()
+        self.ema_model.eval()
         with torch.no_grad():
             for batch_idx, (batch_input, batch_target, data_ids, _) in enumerate(data_loader):
                 batch_target_np = batch_target.numpy()
                 if torch.cuda.is_available():
                     batch_input = batch_input.cuda()
 
-                pred_strong, pred_weak = self.model(batch_input)
+                if self.args.ssl:
+                    pred_strong, pred_weak = self.model(batch_input)
+                else:
+                    pred_strong, pred_weak = self.model(batch_input)
 #                 if self.forward_count > 5000:
 #                     ipdb.set_trace()
 

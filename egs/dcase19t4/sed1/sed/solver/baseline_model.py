@@ -71,7 +71,7 @@ class CNN(nn.Module):
 
         self.cnn = cnn
 
-    def load(self, filename=None, parameters=None):
+    def _load(self, filename=None, parameters=None):
         if filename is not None:
             self.cnn.load_state_dict(torch.load(filename))
         elif parameters is not None:
@@ -79,10 +79,10 @@ class CNN(nn.Module):
         else:
             raise NotImplementedError("load is a filename or a list of parameters (state_dict)")
 
-    def state_dict(self, destination=None, prefix='', keep_vars=False):
+    def _state_dict(self, destination=None, prefix='', keep_vars=False):
         return self.cnn.state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
 
-    def save(self, filename):
+    def _save(self, filename):
         torch.save(self.cnn.state_dict(), filename)
 
     def forward(self, x):
