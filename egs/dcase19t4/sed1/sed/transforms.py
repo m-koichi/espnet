@@ -30,13 +30,16 @@ class GaussianNoise:
 
 
 class ApplyLog(object):
-    def __init__(self):
-        pass
+    def __init__(self, zero_db=False):
+        self.zero_db = zero_db
 
     def __call__(self, sample):
-        return librosa.amplitude_to_db(sample)
-    
-    
+        if self.zero_db:
+            return librosa.amplitude_to_db(sample, ref=np.max)
+        else:
+            return librosa.amplitude_to_db(sample)
+
+
 class Gain(object):
     def __init__(self, low=0.8, high=1.2):
         self.low = low
@@ -113,7 +116,7 @@ class TimeShift(object):
 
 
 class FrequencyShift(object):
-    def __init__(self, mean=0, std=8):
+    def __init__(self, mean=0, std=3):
         self.mean = mean
         self.std = std
 

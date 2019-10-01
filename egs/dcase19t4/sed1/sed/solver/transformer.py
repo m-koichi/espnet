@@ -580,7 +580,7 @@ class TransformerSolver(object):
         # compute the gradient norm to check if it is normal or not
         grad_norm = torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(), self.grad_clip_threshold)
-        logging.info('grad norm={}'.format(grad_norm))
+#         logging.info('grad norm={}'.format(grad_norm))
         if math.isnan(grad_norm):
             logging.warning('grad norm is nan. Do not update model.')
         else:
@@ -598,7 +598,7 @@ class TransformerSolver(object):
 
     def get_predictions(self, data_loader, decoder, threshold=0.5, binarization_type='global_threshold',
                         post_processing=None, save_predictions=None, mode='validation',
-                        logger=None, pooling_time_ratio=1., sample_rate=22050, hop_length=365):
+                        logger=None, pooling_time_ratio=1., sample_rate=22050, hop_length=365, save_h5=True):
         
         prediction_df = pd.DataFrame()
 
@@ -610,66 +610,70 @@ class TransformerSolver(object):
         tag_measure = ConfMat()
         self.model.eval()
         self.ema_model.eval()
-        with h5py.File(os.path.join(self.exp_name, 'score', str(self.forward_count) + '.h5'), 'w') as h5:
-            with torch.no_grad():
-                for batch_idx, (batch_input, batch_target, data_ids, _) in enumerate(data_loader):
-                    batch_target_np = batch_target.numpy()
-                    if torch.cuda.is_available():
-                        batch_input = batch_input.cuda()
+        if save_h5:
+            h5 = h5py.File(os.path.join(self.exp_name, 'score', str(self.forward_count) + '.h5'), 'w')
+        with torch.no_grad():
+            for batch_idx, (batch_input, batch_target, data_ids, _) in enumerate(data_loader):
+                batch_target_np = batch_target.numpy()
+                if torch.cuda.is_available():
+                    batch_input = batch_input.cuda()
 
-                    if self.args.ssl:
-                        pred_strong, pred_weak, _ = self.model(batch_input)
-                    else:
-                        pred_strong, pred_weak, _ = self.model(batch_input)
-    #                 if self.forward_count > 5000:
-    #                     ipdb.set_trace()
+                if self.args.ssl:
+                    pred_strong, pred_weak, _ = self.ema_model(batch_input)
+                else:
+                    pred_strong, pred_weak, _ = self.model(batch_input)
+#                 if self.forward_count > 5000:
+#                     ipdb.set_trace()
 
-                    if mode == 'validation':
-                        class_criterion = torch.nn.BCELoss().cuda()
-                        target = batch_target.cuda()
-                        strong_class_loss = class_criterion(pred_strong, target)
-                        weak_class_loss = class_criterion(pred_weak, target.max(-2)[0])
-                        avg_strong_loss += strong_class_loss.item() / len(data_loader)
-                        avg_weak_loss += weak_class_loss.item() / len(data_loader)
+                if mode == 'validation':
+                    class_criterion = torch.nn.BCELoss().cuda()
+                    target = batch_target.cuda()
+                    strong_class_loss = class_criterion(pred_strong, target)
+                    weak_class_loss = class_criterion(pred_weak, target.max(-2)[0])
+                    avg_strong_loss += strong_class_loss.item() / len(data_loader)
+                    avg_weak_loss += weak_class_loss.item() / len(data_loader)
 
-                    pred_strong = pred_strong.cpu().data.numpy()
-                    pred_weak = pred_weak.cpu().data.numpy()
+                pred_strong = pred_strong.cpu().data.numpy()
+                pred_weak = pred_weak.cpu().data.numpy()
 
+                if save_h5:
                     for data_id, ps in zip(data_ids, pred_strong):
                         h5.create_group(data_id)
                         h5[data_id].create_dataset('pred_strong', data=ps)
 
-                    if binarization_type == 'class_threshold':
-                        for i in range(pred_strong.shape[0]):
-                            pred_strong[i] = ProbabilityEncoder().binarization(pred_strong[i],
-                                                                               binarization_type=binarization_type,
-                                                                               threshold=threshold, time_axis=0)
-                    else:
-                        pred_strong = ProbabilityEncoder().binarization(pred_strong, binarization_type=binarization_type,
-                                                                        threshold=threshold)
-                        pred_weak = ProbabilityEncoder().binarization(pred_weak, binarization_type=binarization_type,
-                                                                        threshold=threshold)
+                if binarization_type == 'class_threshold':
+                    for i in range(pred_strong.shape[0]):
+                        pred_strong[i] = ProbabilityEncoder().binarization(pred_strong[i],
+                                                                           binarization_type=binarization_type,
+                                                                           threshold=threshold, time_axis=0)
+                else:
+                    pred_strong = ProbabilityEncoder().binarization(pred_strong, binarization_type=binarization_type,
+                                                                    threshold=threshold)
+                    pred_weak = ProbabilityEncoder().binarization(pred_weak, binarization_type=binarization_type,
+                                                                    threshold=threshold)
 
-                    if post_processing is not None:
-                        for i in range(pred_strong.shape[0]):
-                            for post_process_fn in post_processing:
-                                pred_strong[i] = post_process_fn(pred_strong[i])
+                if post_processing is not None:
+                    for i in range(pred_strong.shape[0]):
+                        for post_process_fn in post_processing:
+                            pred_strong[i] = post_process_fn(pred_strong[i])
 
-                    for i in range(len(pred_strong)):
-                        tn, fp, fn, tp = confusion_matrix(batch_target_np[i].max(axis=0), pred_weak[i], labels=[0,1]).ravel()
-                        tag_measure.add_cf(tn, fp, fn, tp)
-                        for j in range(len(CLASSES)):
-    #                         import ipdb
-    #                         ipdb.set_trace()
-                            tn, fp, fn, tp = confusion_matrix(batch_target_np[i][:, j], pred_strong[i][:, j], labels=[0,1]).ravel()
-                            frame_measure[j].add_cf(tn, fp, fn, tp)
+                for i in range(len(pred_strong)):
+                    tn, fp, fn, tp = confusion_matrix(batch_target_np[i].max(axis=0), pred_weak[i], labels=[0,1]).ravel()
+                    tag_measure.add_cf(tn, fp, fn, tp)
+                    for j in range(len(CLASSES)):
+#                         import ipdb
+#                         ipdb.set_trace()
+                        tn, fp, fn, tp = confusion_matrix(batch_target_np[i][:, j], pred_strong[i][:, j], labels=[0,1]).ravel()
+                        frame_measure[j].add_cf(tn, fp, fn, tp)
 
-                    for pred, data_id in zip(pred_strong, data_ids):
-                        pred = decoder(pred)
-                        pred = pd.DataFrame(pred, columns=["event_label", "onset", "offset"])
-                        pred["filename"] = re.sub('^.*?-', '', data_id + '.wav')
-                        prediction_df = prediction_df.append(pred)
-                    
+                for pred, data_id in zip(pred_strong, data_ids):
+                    pred = decoder(pred)
+                    pred = pd.DataFrame(pred, columns=["event_label", "onset", "offset"])
+                    pred["filename"] = re.sub('^.*?-', '', data_id + '.wav')
+                    prediction_df = prediction_df.append(pred)
+        
+        if save_h5:
+            h5.close()
         # In seconds
         prediction_df.onset = prediction_df.onset * pooling_time_ratio / (sample_rate / hop_length)
         prediction_df.offset = prediction_df.offset * pooling_time_ratio / (sample_rate / hop_length)

@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import re
 from sklearn.metrics import confusion_matrix
+import os
 import ipdb
 
 CLASSES = {
@@ -235,8 +236,13 @@ def get_batch_predictions_trans(model, data_loader, decoder, post_processing=Non
         if torch.cuda.is_available():
             batch_input = batch_input.cuda()
         # pred_strong, pred_weak, _ = model(batch_input)
-        pred_strong, pred_weak, _ = model(batch_input)
-        
+        pred_strong, pred_weak, attn_ws = model(batch_input)
+#         attn_ws = attn_ws.cpu().detach().numpy()
+#         for data_id, attn_w in zip(data_ids, attn_ws):
+#             os.mkdir(f'img/attnw/{data_id}')
+#             for i, head in enumerate(attn_w):
+#                 plot_attention_weights(attn_ws=head, dest=f'img/attnw/{data_id}/head_{i}', ext='png')
+#         ipdb.set_trace()
         target_np = target.numpy()
 
         if mode == 'validation':
@@ -335,3 +341,9 @@ def average_checkpoint(models):
 
 def score_fusion(models):
     pass
+
+def plot_attention_weights(attn_ws, dest, ext='png'):
+    plt.imshow(attn_ws, origin='lower')
+    plt.xlabel('Query')
+    plt.ylabel('Key')
+    plt.savefig(f'{dest}.{ext}')

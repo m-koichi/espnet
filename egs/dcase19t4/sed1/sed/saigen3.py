@@ -678,7 +678,7 @@ def main(args):
         model_path = os.path.join("exp3", args.run_name, "model", "average.pth")
         solver.load(model_path, model_path)
     else:
-        print('++++++load============')
+        print('========== load ============')
         model_path = os.path.join("exp3", args.run_name, "model", "best_iteration.pth")
         solver.load(model_path, model_path)
         
@@ -736,13 +736,14 @@ def main(args):
         pooling_time_ratio=args.pooling_time_ratio,
         sample_rate=sample_rate,
         hop_length=hop_length,
+        save_h5=False
     )
     valid_events_metric, valid_segments_metric = compute_strong_metrics(
         predictions,
         validation_df,
         pooling_time_ratio=None,
         sample_rate=sample_rate,
-        hop_length=hop_length,
+        hop_length=hop_length
     )
     
     # ==== search best post process parameters ====

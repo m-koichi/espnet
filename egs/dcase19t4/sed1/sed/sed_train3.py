@@ -32,7 +32,7 @@ from evaluation_measures import compute_strong_metrics, segment_based_evaluation
 
 from dataset import SEDDatasetTrans as SEDDataset
 from dataset import SEDDatasetTransEMA as SEDDatasetEMA
-from transforms import Normalize, ApplyLog, GaussianNoise, TimeWarp, FrequencyMask, TimeMask, Gain, SpecAugment
+from transforms import Normalize, ApplyLog, GaussianNoise, TimeWarp, FrequencyMask, TimeMask, Gain, SpecAugment, TimeShift
 from solver.mcd import MCDSolver
 # from solver.CNN import CNN
 # from solver.RNN import RNN
@@ -361,6 +361,8 @@ def main(args):
                         help='use scaling factor extracted by training dataset')
     parser.add_argument('--ssl', default=False, type= strtobool,
                         help='use scaling factor extracted by training dataset')
+    parser.add_argument('--data-augmentation', default=False, type= strtobool,
+                        help='use scaling factor extracted by training dataset')
     
 
     args = parser.parse_args(args)
@@ -377,15 +379,15 @@ def main(args):
         raise ValueError
 
     os.makedirs(os.path.join('exp3', args.run_name), exist_ok=True)
-    exp_name = f'exp3/{args.run_name}/{datetime.now().strftime("%Y_%m%d")}_{args.model}_fm{args.use_specaugment}' \
-               f'_pp{args.use_post_processing}_an{args.add_noise}_iter{args.iterations}' \
-               f'_ptr{args.pooling_time_ratio}_loss{args.loss_function}' \
-               f'_po-{args.pooling_operator}' \
-               f'_train-{args.train_data}_test-{args.test_data}_opt-{args.opt}_mels{args.mels}' \
-               f'_logmel{args.log_mels}_tinit-{args.transformer_init}_tinput-{args.transformer_input_layer}' \
-               f'_tdo{args.transformer_attn_dropout_rate}_tlr{args.transformer_lr}_twu{args.transformer_warmup_steps}' \
-               f'_adim{args.adim}_aheads{args.aheads}_elayers{args.elayers}_eunits{args.eunits}_ag{args.accum_grad}' \
-               f'_ilt{args.input_layer_type}_cls{args.classifier}'
+#     exp_name = f'exp3/{args.run_name}/{datetime.now().strftime("%Y_%m%d")}_{args.model}_fm{args.use_specaugment}' \
+#                f'_pp{args.use_post_processing}_an{args.add_noise}_iter{args.iterations}' \
+#                f'_ptr{args.pooling_time_ratio}_loss{args.loss_function}' \
+#                f'_po-{args.pooling_operator}' \
+#                f'_train-{args.train_data}_test-{args.test_data}_opt-{args.opt}_mels{args.mels}' \
+#                f'_logmel{args.log_mels}_tinit-{args.transformer_init}_tinput-{args.transformer_input_layer}' \
+#                f'_tdo{args.transformer_attn_dropout_rate}_tlr{args.transformer_lr}_twu{args.transformer_warmup_steps}' \
+#                f'_adim{args.adim}_aheads{args.aheads}_elayers{args.elayers}_eunits{args.eunits}_ag{args.accum_grad}' \
+#                f'_ilt{args.input_layer_type}_cls{args.classifier}'
     exp_name = f'exp3/{args.run_name}'
     os.makedirs(os.path.join(exp_name, 'model'), exist_ok=True)
     os.makedirs(os.path.join(exp_name, 'predictions'), exist_ok=True)
@@ -439,17 +441,17 @@ def main(args):
         train_synth_dataset = SEDDataset(train_synth_json,
                                          label_type='strong',
                                          sequence_length=args.n_frames,
-                                         transforms=[ApplyLog()],
+                                         transforms=[ApplyLog(args.use_rir_augmentation)],
                                          pooling_time_ratio=args.pooling_time_ratio)
         train_weak_dataset = SEDDataset(train_weak_json,
                                         label_type='weak',
                                         sequence_length=args.n_frames,
-                                        transforms=[ApplyLog()],
+                                        transforms=[ApplyLog(args.use_rir_augmentation)],
                                         pooling_time_ratio=args.pooling_time_ratio)
         train_unlabel_dataset = SEDDataset(train_unlabel_json,
                                            label_type='unlabel',
                                            sequence_length=args.n_frames,
-                                           transforms=[ApplyLog()],
+                                           transforms=[ApplyLog(args.use_rir_augmentation)],
                                            pooling_time_ratio=args.pooling_time_ratio)
         scaling_factor = get_scaling_factor([train_synth_dataset,
                                             train_weak_dataset,
@@ -462,19 +464,22 @@ def main(args):
     if args.use_specaugment:
         # train_transforms = [Normalize(), TimeWarp(), FrequencyMask(), TimeMask()]
         if args.log_mels:
-            train_transforms = [ApplyLog(), scaling, Gain(), FrequencyMask()]
-            test_transforms = [ApplyLog(), scaling]
+            train_transforms = [ApplyLog(args.use_rir_augmentation), scaling, Gain(), FrequencyMask()]
+            test_transforms = [ApplyLog(args.use_rir_augmentation), scaling]
         else:
             train_transforms = [scaling, FrequencyMask()]
             test_transforms = [scaling]
     else:
         if args.log_mels:
-            train_transforms = [ApplyLog(), scaling, Gain()]
-            test_transforms = [ApplyLog(), scaling]
+            train_transforms = [ApplyLog(args.use_rir_augmentation), scaling, Gain()]
+            test_transforms = [ApplyLog(args.use_rir_augmentation), scaling]
         else:
             train_transforms = [scaling]
             test_transforms = [scaling]
             
+    if args.data_augmentation:
+            train_transforms = [ApplyLog(args.use_rir_augmentation), scaling, Gain(), FrequencyMask()]
+            test_transforms = [ApplyLog(args.use_rir_augmentation), scaling]
 #     if args.add_noise:
 #         train_transforms.append(GaussianNoise())
 #         test_transforms.append(GaussianNoise())

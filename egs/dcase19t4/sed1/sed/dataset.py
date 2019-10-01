@@ -221,36 +221,77 @@ class SEDDatasetTrans(Dataset):
 
         # x_ = np.load(os.path.join('./DCASE2019_task4/dataset/features/sr44100_win2048_hop511_mels64_nolog/features', re.sub('^.*?-', '', data_id + '.npy')))
 
-        if self.transforms:
-            for transform in self.transforms:
-                # pdb.set_trace()
-                x = transform(x)
-        x, mask = pad_trunc_sequence_mask(x, self.sequence_length)
-
         if self.label_type == 'strong':
             output = self.json_data[data_id]['output'][0]
             y = np.zeros((output['label'][0]['shape'][1], len(output['label'])))
             for label_idx, label in enumerate(output['label']):
                 y[:, label_idx] = np.array(label['tokenid'])
-            # pdb.set_trace()
+                
+            if self.transforms:
+                for transform in self.transforms:
+                    if transform.__class__.__name__ == 'TimeShift':
+                        x, y = transform(x, y)
+                    else:
+                        x = transform(x)
+            x, mask = pad_trunc_sequence_mask(x, self.sequence_length)
             y = y[self.pooling_time_ratio-1::self.pooling_time_ratio, :]
-            # if self.time_shift:
-                # import ipdb
-#             ipdb.set_trace()
                 # x, y = TimeShift()(x, y)
-#             y[0,:] = 0
             assert x.shape[0] == y.shape[0] * self.pooling_time_ratio, \
                 f'mismatch shape x.shape[0]={x.shape[0]} and y.shape[0]={y.shape[0]}'
         elif self.label_type == 'weak':
+            if self.transforms:
+                for transform in self.transforms:
+                    x = transform(x)
+            x, mask = pad_trunc_sequence_mask(x, self.sequence_length)
             output = self.json_data[data_id]['output'][0]
             y = np.array(output['label']['tokenid'])
         elif self.label_type == 'unlabel':
+            if self.transforms:
+                for transform in self.transforms:
+                    x = transform(x)
+            x, mask = pad_trunc_sequence_mask(x, self.sequence_length)
             y = np.array([-1])
         else:
             raise ValueError(f'label_type "{self.label_type}" is not suported.')
-        
-#         mat_to_img(x.T, dest=f'img/weak_logmel/{data_id}')
+
         return torch.from_numpy(x).float().unsqueeze(0), torch.from_numpy(y).float(), data_id, mask
+        
+#     def __getitem__(self, index):
+#         data_id = self.data_ids[index]
+#         x = kaldiio.load_mat(self.json_data[data_id]['input'][0]['feats'])
+
+#         # x_ = np.load(os.path.join('./DCASE2019_task4/dataset/features/sr44100_win2048_hop511_mels64_nolog/features', re.sub('^.*?-', '', data_id + '.npy')))
+
+#         if self.transforms:
+#             for transform in self.transforms:
+#                 # pdb.set_trace()
+#                 x = transform(x)
+#         x, mask = pad_trunc_sequence_mask(x, self.sequence_length)
+
+#         if self.label_type == 'strong':
+#             output = self.json_data[data_id]['output'][0]
+#             y = np.zeros((output['label'][0]['shape'][1], len(output['label'])))
+#             for label_idx, label in enumerate(output['label']):
+#                 y[:, label_idx] = np.array(label['tokenid'])
+#             # pdb.set_trace()
+#             y = y[self.pooling_time_ratio-1::self.pooling_time_ratio, :]
+#             # if self.time_shift:
+#                 # import ipdb
+# #             ipdb.set_trace()
+#                 # x, y = TimeShift()(x, y)
+# #             y[0,:] = 0
+#             assert x.shape[0] == y.shape[0] * self.pooling_time_ratio, \
+#                 f'mismatch shape x.shape[0]={x.shape[0]} and y.shape[0]={y.shape[0]}'
+#         elif self.label_type == 'weak':
+#             output = self.json_data[data_id]['output'][0]
+#             y = np.array(output['label']['tokenid'])
+#         elif self.label_type == 'unlabel':
+#             y = np.array([-1])
+#         else:
+#             raise ValueError(f'label_type "{self.label_type}" is not suported.')
+        
+# #         mat_to_img(x.T, dest=f'img/weak_logmel/{data_id}')
+#         return torch.from_numpy(x).float().unsqueeze(0), torch.from_numpy(y).float(), data_id, mask
 
     def __len__(self):
         return len(self.json_data)
@@ -325,8 +366,11 @@ def pad_trunc_sequence(x, max_sequence_length):
     return x_new
 
 
-def pad_trunc_sequence_mask(x, max_sequence_length):
+def pad_trunc_sequence_mask(x, max_sequence_length, pooling_time_ratio=8, add_one_frame=False):
     length = x.shape[0]
+    if add_one_frame:
+        max_sequence_length += pooling_time_ratio
+        length += pooling_time_ratio
 
     if length < max_sequence_length:
         x_new = np.pad(x, [(0, max_sequence_length - length), (0, 0)], 'constant')
@@ -338,5 +382,5 @@ def pad_trunc_sequence_mask(x, max_sequence_length):
     else:
         x_new = x
         mask = torch.ones((max_sequence_length, max_sequence_length))
-    return x_new, mask[7::8, 7::8]
+    return x_new, mask[pooling_time_ratio-1::pooling_time_ratio, pooling_time_ratio-1::pooling_time_ratio]
 
