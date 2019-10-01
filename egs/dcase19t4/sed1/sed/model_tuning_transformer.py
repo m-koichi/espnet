@@ -56,7 +56,7 @@ def search_best_threshold(model, valid_loader, validation_df, many_hot_encoder, 
     for i, label in enumerate(LABELS):
         thres_list[i] = best_th[label]
 
-    predictions, _, _ , _, _, _, _ = get_batch_predictions_trans(model, valid_loader, many_hot_encoder.decode_strong, post_processing=None,
+    predictions, ave_precision, ave_recall, macro_f1, weak_f1, _, _ = get_batch_predictions_trans(model, valid_loader, many_hot_encoder.decode_strong, post_processing=None,
                                         threshold=thres_list, binarization_type='class_threshold',
                                         pooling_time_ratio=pooling_time_ratio,
                                         sample_rate=sample_rate,
@@ -66,7 +66,12 @@ def search_best_threshold(model, valid_loader, validation_df, many_hot_encoder, 
                                                  sample_rate=sample_rate, hop_length=hop_length)
     # predictions = get_batch_predictions_tta(model, valid_loader, many_hot_encoder.decode_strong)
     # valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=1)
-
+    global_valid = valid_events_metric.results_class_wise_average_metrics()['f_measure']['f_measure']
+    segment_valid = valid_segments_metric.results_class_wise_average_metrics()['f_measure']['f_measure']
+    
+    print('Eb\tSb\tFb\tF_pre\tF_rec\twwak-f1')
+    print(f'{global_valid * 100:.4}\t{segment_valid * 100:.4}\t{macro_f1 * 100:.4}\t{ave_precision * 100:.4}\t{ave_recall * 100:.4}\t{weak_f1 * 100:.4}')
+    
     print('best_th:', best_th)
     print('best_f1:', best_f1)
     return best_th, best_f1
@@ -491,7 +496,8 @@ def show_best(model, valid_loader, validation_df, many_hot_encoder, pp_params,
     post_processing_fn = [functools.partial(median_filt_1d, filt_span=list(best_fs)),
                           functools.partial(fill_up_gap, accept_gap=list(best_ag)),
                           functools.partial(remove_short_duration, reject_duration=list(best_rd))]
-    predictions, _, _, _, _, _, _ = get_batch_predictions_trans(model, valid_loader, many_hot_encoder.decode_strong,
+    
+    predictions, ave_precision, ave_recall, macro_f1, weak_f1, _, _ = get_batch_predictions_trans(model, valid_loader, many_hot_encoder.decode_strong,
                                         post_processing=post_processing_fn,
                                         threshold=best_th, binarization_type='class_threshold',
                                         pooling_time_ratio=pooling_time_ratio,
@@ -499,6 +505,11 @@ def show_best(model, valid_loader, validation_df, many_hot_encoder, pp_params,
                                         hop_length=hop_length)
     valid_events_metric, valid_segments_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
                                                  sample_rate=sample_rate, hop_length=hop_length)
+    global_valid = valid_events_metric.results_class_wise_average_metrics()['f_measure']['f_measure']
+    segment_valid = valid_segments_metric.results_class_wise_average_metrics()['f_measure']['f_measure']
+    
+    print('Eb\tSb\tFb\tF_pre\tF_rec\twwak-f1')
+    print(f'{global_valid * 100:.4}\t{segment_valid * 100:.4}\t{macro_f1 * 100:.4}\t{ave_precision * 100:.4}\t{ave_recall * 100:.4}\t{weak_f1 * 100:.4}')
 
 
 def model_ensemble(models, valid_loader, mode='majority_voting', majority_th=None, save_predictions=None):

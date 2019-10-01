@@ -1350,6 +1350,9 @@ def main(args):
     args = parser.parse_args(args)
 
     # exp_name = os.path.join('exp', datetime.now().strftime("%Y_%m%d_%H%M%S"))
+    
+    if os.path.exists(os.path.join('exp3', args.run_name)) and args.run_name != 'debug':
+        raise ValueError(f'run_name "{args.run_name}" is already used. try another run_name.')
     os.makedirs(os.path.join('exp3', args.run_name), exist_ok=True)
     exp_name = f'exp3/{args.run_name}/{datetime.now().strftime("%Y_%m%d")}_model-{args.model}_rir-{args.use_specaugment}' \
                f'_sa-{args.use_specaugment}_pp-{args.use_post_processing}_i-{args.iterations}' \
@@ -1358,6 +1361,7 @@ def main(args):
                f'_train-{args.train_data}_test-{args.test_data}_opt-{args.opt}-{args.lr}_mels{args.mels}' \
                f'_logmel{args.log_mels}_mode{args.exp_mode}'
     exp_name = f'exp3/{args.run_name}'
+
     os.makedirs(os.path.join(exp_name, 'model'), exist_ok=True)
     os.makedirs(os.path.join(exp_name, 'predictions'), exist_ok=True)
     os.makedirs(os.path.join(exp_name, 'log'), exist_ok=True)
@@ -1494,16 +1498,16 @@ def main(args):
                                    pooling_time_ratio=args.pooling_time_ratio,
                                    time_shift=False)
 
-    train_synth_loader = DataLoader(train_synth_dataset, batch_size=args.batch_size, shuffle=True, drop_last=False)
-    train_weak_loader = DataLoader(train_weak_dataset, batch_size=args.batch_size, shuffle=True, drop_last=False)
-    train_unlabel_loader = DataLoader(train_unlabel_dataset, batch_size=args.batch_size*2, shuffle=True, drop_last=False)
+    train_synth_loader = DataLoader(train_synth_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
+    train_weak_loader = DataLoader(train_weak_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
+    train_unlabel_loader = DataLoader(train_unlabel_dataset, batch_size=args.batch_size*2, shuffle=True, drop_last=True)
     
     
 #     train_synth_loader_ema = DataLoader(train_synth_dataset_ema, batch_size=args.batch_size, shuffle=False, drop_last=True)
 #     train_weak_loader_ema = DataLoader(train_weak_dataset_ema, batch_size=args.batch_size, shuffle=False, drop_last=True)
 #     train_unlabel_loader_ema = DataLoader(train_unlabel_dataset_ema, batch_size=args.batch_size, shuffle=False, drop_last=True)
     
-    valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False)
+    valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size*2, shuffle=False)
 
     many_hot_encoder = ManyHotEncoder(cfg.classes, n_frames=args.n_frames // args.pooling_time_ratio)
     # logging info
@@ -1601,7 +1605,8 @@ def main(args):
     
     sample_rate, hop_length = get_sample_rate_and_hop_length(args)
 
-    optim_kwargs = {"lr": args.lr, "betas": (0.9, 0.999), "weight_decay": 0.0001}
+#     optim_kwargs = {"lr": args.lr, "betas": (0.9, 0.999), "weight_decay": 0.0001}
+    optim_kwargs = {"lr": args.lr, "betas": (0.9, 0.999)}
     if args.opt == 'adam':
         optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, crnn.parameters()), **optim_kwargs)
     elif args.opt == 'adabound':
@@ -1657,7 +1662,7 @@ def main(args):
             if args.ssl:
                 train_one_step_ema(train_synth_loader, train_weak_loader, train_unlabel_loader,
                                    crnn, crnn_ema, optimizer, logger,
-                                   loss_function='BCE',
+                                   loss_function=args.loss_function,
                                    iterations=args.iterations,
                                    log_interval=args.log_interval,
                                    valid_loader=valid_loader,

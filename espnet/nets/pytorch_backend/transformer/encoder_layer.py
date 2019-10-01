@@ -12,7 +12,7 @@ class EncoderLayer(nn.Module):
     :param float dropout_rate: dropout rate
     """
 
-    def __init__(self, size, self_attn, feed_forward, dropout_rate):
+    def __init__(self, size, self_attn, feed_forward, dropout_rate, after_conv=False):
         super(EncoderLayer, self).__init__()
         self.self_attn = self_attn
         self.feed_forward = feed_forward
@@ -20,14 +20,29 @@ class EncoderLayer(nn.Module):
         self.norm2 = LayerNorm(size)
         self.dropout = nn.Dropout(dropout_rate)
         self.size = size
+        self.after_conv = after_conv
+        if after_conv:
+            # self.conv = nn.Conv2d(size, size, 3, 1, 1)
+            self.pool = nn.MaxPool2d((2, 1))
 
-    def forward(self, x, mask):
+
+    def forward(self, x, mask, attn=None):
         """Compute encoded features
         :param torch.Tensor x: encoded source features (batch, max_time_in, size)
         :param torch.Tensor mask: mask for x (batch, max_time_in)
         :rtype: Tuple[torch.Tensor, torch.Tensor]
         """
         nx = self.norm1(x)
-        x = x + self.dropout(self.self_attn(nx, nx, nx, mask))
+        x, attn_ws = self.self_attn(nx, nx, nx, mask)
+        x = x + self.dropout(x)
+#         x = x + self.dropout(self.self_attn(nx, nx, nx, mask))
         nx = self.norm2(x)
-        return x + self.dropout(self.feed_forward(nx)), mask
+        nx = x + self.dropout(self.feed_forward(nx))
+        if self.after_conv:
+            # nx = nn.functional.relu(self.conv(nx))
+            nx = self.pool(nx)
+            mask = mask[:, ::2, ::2]
+#            import ipdb
+#            ipdb.set_trace()
+        return nx, mask, attn_ws
+#       return nx, mask

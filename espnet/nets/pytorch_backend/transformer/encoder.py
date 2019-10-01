@@ -15,17 +15,28 @@ class Encoder(torch.nn.Module):
     :param argparse.Namespace args: experiment config
     """
 
-    def __init__(self, idim, args):
+    def __init__(self, idim, args, pos_enc=True):
         super(Encoder, self).__init__()
         if args.transformer_input_layer == "linear":
-            self.input_layer = torch.nn.Sequential(
-                torch.nn.Linear(idim, args.adim),
-                torch.nn.LayerNorm(args.adim),
-                torch.nn.Dropout(args.dropout_rate),
-                torch.nn.ReLU(),
-                PositionalEncoding(args.adim, args.dropout_rate)
-            )
+            if pos_enc:
+                self.input_layer = torch.nn.Sequential(
+                    torch.nn.Linear(idim, args.adim),
+                    torch.nn.LayerNorm(args.adim),
+                    torch.nn.Dropout(args.dropout_rate),
+                    torch.nn.ReLU(),
+                    PositionalEncoding(args.adim, args.dropout_rate)
+                )
+            else:
+                self.input_layer = torch.nn.Sequential(
+                    torch.nn.Linear(idim, args.adim),
+                    torch.nn.LayerNorm(args.adim),
+                    torch.nn.Dropout(args.dropout_rate),
+                    torch.nn.ReLU(),
+                )
+
         elif args.transformer_input_layer == "conv2d":
+            self.input_layer = Conv2dSubsampling(idim, args.adim, args.dropout_rate)
+        elif args.transformer_input_layer == "conv2d_no":
             self.input_layer = Conv2dNoSubsampling(idim, args.adim, args.dropout_rate)
         elif args.transformer_input_layer == "embed":
             self.input_layer = torch.nn.Sequential(
@@ -41,7 +52,8 @@ class Encoder(torch.nn.Module):
                 args.adim,
                 MultiHeadedAttention(args.aheads, args.adim, args.transformer_attn_dropout_rate),
                 PositionwiseFeedForward(args.adim, args.eunits, args.dropout_rate),
-                args.dropout_rate
+                args.dropout_rate,
+                args.after_conv
             )
         )
         self.norm = LayerNorm(args.adim)
@@ -55,7 +67,11 @@ class Encoder(torch.nn.Module):
         """
         if isinstance(self.input_layer, Conv2dNoSubsampling):
             x, mask = self.input_layer(x, mask)
+        elif isinstance(self.input_layer, Conv2dSubsampling):
+            x, mask = self.input_layer(x, mask)
         else:
             x = self.input_layer(x)
-        x, mask = self.encoders(x, mask)
-        return self.norm(x), mask
+#         x, mask = self.encoders(x, mask)
+#         return x, mask
+        x, mask, attn_ws = self.encoders(x, mask)
+        return self.norm(x), mask, attn_ws

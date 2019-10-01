@@ -28,6 +28,8 @@ from my_utils import ConfMat
 from sklearn.metrics import confusion_matrix
 import numpy as np
 from CB_loss import CBLoss
+import h5py
+import os
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -88,11 +90,6 @@ class Transformer(torch.nn.Module):
         if classifier == 'linear':
             self.classifier = torch.nn.Linear(args.adim, n_class)
             self.weak_classifier = torch.nn.Linear(args.adim, n_class)
-        elif classifier == 'conv':
-            raise NotImplementedError
-        elif classifier == 'dense':
-            self.classifier = torch.nn.Linear(args.adim, n_class)
-            self.weak_classifier = torch.nn.Linear(args.adim * n_frames, n_class)
         elif classifier == 'rnn':
             self.classifier = torch.nn.Sequential(
                                 BidirectionalGRU(args.adim, args.adim, dropout=args.dropout, num_layers=2),
@@ -146,7 +143,7 @@ class Transformer(torch.nn.Module):
 #             x[:, 0, :] = 1 # replace first frame to one vector
         
         # Encoder
-        x, x_mask = self.encoder(x, mask)            
+        x, x_mask, attn_ws = self.encoder(x, mask)
         
         
         if self.pooling == 'attention':
@@ -177,7 +174,7 @@ class Transformer(torch.nn.Module):
             strong = x[:, 1:, :]
             weak = x[:, 0, :]
             
-        return strong, weak
+        return strong, weak, attn_ws
 
     
     def reset_parameters(self, args):
@@ -248,12 +245,15 @@ class TransformerSolver(object):
                  mode='SED'):
         self.model = model.cuda() if torch.cuda.is_available() else model
         self.ema_model = ema_model.cuda() if torch.cuda.is_available() else ema_model
+        
+        self.exp_name = exp_name
+        
         if data_parallel:
             self.model = torch.nn.DataParallel(self.model)
             self.ema_model = torch.nn.DataParallel(self.ema_model)
 
         self.criterion = criterion
-        if criterion == 'BCE':
+        if criterion == 'BCE' or criterion == 'attention':
             self.strong_criterion = torch.nn.BCELoss().cuda()
             self.weak_criterion = torch.nn.BCELoss().cuda()
         elif criterion == 'FocalLoss':
@@ -312,10 +312,10 @@ class TransformerSolver(object):
         strong_mask = strong_mask.cuda()
         weak_mask = weak_mask.cuda()
 
-        pred_strong, pred_weak = self.model(strong_sample, strong_mask)
+        pred_strong, pred_weak, attn_ws = self.model(strong_sample, strong_mask)
         strong_loss = self.strong_criterion(pred_strong, strong_target)
 
-        pred_strong, pred_weak = self.model(weak_sample, weak_mask)
+        pred_strong, pred_weak, _ = self.model(weak_sample, weak_mask)
         weak_loss = self.weak_criterion(pred_weak, weak_target)
 
         if self.model.pooling == 'test':
@@ -326,6 +326,10 @@ class TransformerSolver(object):
             loss = (10 * strong_loss + weak_loss) / self.accum_grad
         elif self.criterion == 'CBLoss':
             loss = (strong_loss + weak_loss) / self.accum_grad
+        elif self.criterion == 'attention':
+            attn_ws = torch.nn.Sigmoid()(attn_ws[:,:,:,0].transpose(1,2))
+            attn_loss = self.strong_criterion(attn_ws, strong_target)
+            loss = (strong_loss + weak_loss + attn_loss) / self.accum_grad
         loss.backward() # Backprop
         loss.detach() # Truncate the graph
 
@@ -342,6 +346,8 @@ class TransformerSolver(object):
             logging.info('After {} iteration'.format(self.forward_count))
             logging.info('\t Ave. strong loss: {}'.format(self.strong_losses.avg))
             logging.info('\t Ave. weak loss: {}'.format(self.weak_losses.avg))
+            if self.criterion == 'attention':
+                logging.info('\t Ave. attn loss: {}'.format(attn_loss.item()))
             
             
             log_scalar(self.writer, 'train_strong_loss', self.strong_losses.avg, self.forward_count)
@@ -504,9 +510,9 @@ class TransformerSolver(object):
 #             pred_weak_ema_u, pred_weak_ema_w = \
 #                 pred_weak_ema_w.detach(), pred_weak_ema_u.detach()
 #         else:
-        pred_strong_ema_s, pred_weak_ema_s = self.ema_model(strong_sample_ema)
-        pred_strong_ema_w, pred_weak_ema_w = self.ema_model(weak_sample_ema)
-        pred_strong_ema_u, pred_weak_ema_u = self.ema_model(unlabel_sample_ema)
+        pred_strong_ema_s, pred_weak_ema_s, _ = self.ema_model(strong_sample_ema)
+        pred_strong_ema_w, pred_weak_ema_w, _ = self.ema_model(weak_sample_ema)
+        pred_strong_ema_u, pred_weak_ema_u, _ = self.ema_model(unlabel_sample_ema)
         pred_strong_ema_s, pred_strong_ema_w, pred_strong_ema_u = \
             pred_strong_ema_s.detach(), pred_strong_ema_w.detach(), pred_strong_ema_u.detach()
         pred_weak_ema_s, pred_weak_ema_w, pred_weak_ema_u = \
@@ -518,9 +524,9 @@ class TransformerSolver(object):
 #             weak_class_loss = self.criterion(pred_weak_w, weak_target)
 #         else:
 
-        pred_strong_s, pred_weak_s = self.model(strong_sample)
-        pred_strong_w, pred_weak_w = self.model(weak_sample)
-        pred_strong_u, pred_weak_u = self.model(unlabel_sample)
+        pred_strong_s, pred_weak_s, _ = self.model(strong_sample)
+        pred_strong_w, pred_weak_w, _ = self.model(weak_sample)
+        pred_strong_u, pred_weak_u, _ = self.model(unlabel_sample)
         strong_class_loss = self.strong_criterion(pred_strong_s, strong_target)
         weak_class_loss = self.weak_criterion(pred_weak_w, weak_target)
 
@@ -604,60 +610,65 @@ class TransformerSolver(object):
         tag_measure = ConfMat()
         self.model.eval()
         self.ema_model.eval()
-        with torch.no_grad():
-            for batch_idx, (batch_input, batch_target, data_ids, _) in enumerate(data_loader):
-                batch_target_np = batch_target.numpy()
-                if torch.cuda.is_available():
-                    batch_input = batch_input.cuda()
+        with h5py.File(os.path.join(self.exp_name, 'score', str(self.forward_count) + '.h5'), 'w') as h5:
+            with torch.no_grad():
+                for batch_idx, (batch_input, batch_target, data_ids, _) in enumerate(data_loader):
+                    batch_target_np = batch_target.numpy()
+                    if torch.cuda.is_available():
+                        batch_input = batch_input.cuda()
 
-                if self.args.ssl:
-                    pred_strong, pred_weak = self.model(batch_input)
-                else:
-                    pred_strong, pred_weak = self.model(batch_input)
-#                 if self.forward_count > 5000:
-#                     ipdb.set_trace()
+                    if self.args.ssl:
+                        pred_strong, pred_weak, _ = self.model(batch_input)
+                    else:
+                        pred_strong, pred_weak, _ = self.model(batch_input)
+    #                 if self.forward_count > 5000:
+    #                     ipdb.set_trace()
 
-                if mode == 'validation':
-                    class_criterion = torch.nn.BCELoss().cuda()
-                    target = batch_target.cuda()
-                    strong_class_loss = class_criterion(pred_strong, target)
-                    weak_class_loss = class_criterion(pred_weak, target.max(-2)[0])
-                    avg_strong_loss += strong_class_loss.item() / len(data_loader)
-                    avg_weak_loss += weak_class_loss.item() / len(data_loader)
+                    if mode == 'validation':
+                        class_criterion = torch.nn.BCELoss().cuda()
+                        target = batch_target.cuda()
+                        strong_class_loss = class_criterion(pred_strong, target)
+                        weak_class_loss = class_criterion(pred_weak, target.max(-2)[0])
+                        avg_strong_loss += strong_class_loss.item() / len(data_loader)
+                        avg_weak_loss += weak_class_loss.item() / len(data_loader)
 
-                pred_strong = pred_strong.cpu().data.numpy()
-                pred_weak = pred_weak.cpu().data.numpy()
+                    pred_strong = pred_strong.cpu().data.numpy()
+                    pred_weak = pred_weak.cpu().data.numpy()
 
-                if binarization_type == 'class_threshold':
-                    for i in range(pred_strong.shape[0]):
-                        pred_strong[i] = ProbabilityEncoder().binarization(pred_strong[i],
-                                                                           binarization_type=binarization_type,
-                                                                           threshold=threshold, time_axis=0)
-                else:
-                    pred_strong = ProbabilityEncoder().binarization(pred_strong, binarization_type=binarization_type,
-                                                                    threshold=threshold)
-                    pred_weak = ProbabilityEncoder().binarization(pred_weak, binarization_type=binarization_type,
-                                                                    threshold=threshold)
+                    for data_id, ps in zip(data_ids, pred_strong):
+                        h5.create_group(data_id)
+                        h5[data_id].create_dataset('pred_strong', data=ps)
 
-                if post_processing is not None:
-                    for i in range(pred_strong.shape[0]):
-                        for post_process_fn in post_processing:
-                            pred_strong[i] = post_process_fn(pred_strong[i])
-                            
-                for i in range(len(pred_strong)):
-                    tn, fp, fn, tp = confusion_matrix(batch_target_np[i].max(axis=0), pred_weak[i], labels=[0,1]).ravel()
-                    tag_measure.add_cf(tn, fp, fn, tp)
-                    for j in range(len(CLASSES)):
-#                         import ipdb
-#                         ipdb.set_trace()
-                        tn, fp, fn, tp = confusion_matrix(batch_target_np[i][:, j], pred_strong[i][:, j], labels=[0,1]).ravel()
-                        frame_measure[j].add_cf(tn, fp, fn, tp)
+                    if binarization_type == 'class_threshold':
+                        for i in range(pred_strong.shape[0]):
+                            pred_strong[i] = ProbabilityEncoder().binarization(pred_strong[i],
+                                                                               binarization_type=binarization_type,
+                                                                               threshold=threshold, time_axis=0)
+                    else:
+                        pred_strong = ProbabilityEncoder().binarization(pred_strong, binarization_type=binarization_type,
+                                                                        threshold=threshold)
+                        pred_weak = ProbabilityEncoder().binarization(pred_weak, binarization_type=binarization_type,
+                                                                        threshold=threshold)
 
-                for pred, data_id in zip(pred_strong, data_ids):
-                    pred = decoder(pred)
-                    pred = pd.DataFrame(pred, columns=["event_label", "onset", "offset"])
-                    pred["filename"] = re.sub('^.*?-', '', data_id + '.wav')
-                    prediction_df = prediction_df.append(pred)
+                    if post_processing is not None:
+                        for i in range(pred_strong.shape[0]):
+                            for post_process_fn in post_processing:
+                                pred_strong[i] = post_process_fn(pred_strong[i])
+
+                    for i in range(len(pred_strong)):
+                        tn, fp, fn, tp = confusion_matrix(batch_target_np[i].max(axis=0), pred_weak[i], labels=[0,1]).ravel()
+                        tag_measure.add_cf(tn, fp, fn, tp)
+                        for j in range(len(CLASSES)):
+    #                         import ipdb
+    #                         ipdb.set_trace()
+                            tn, fp, fn, tp = confusion_matrix(batch_target_np[i][:, j], pred_strong[i][:, j], labels=[0,1]).ravel()
+                            frame_measure[j].add_cf(tn, fp, fn, tp)
+
+                    for pred, data_id in zip(pred_strong, data_ids):
+                        pred = decoder(pred)
+                        pred = pd.DataFrame(pred, columns=["event_label", "onset", "offset"])
+                        pred["filename"] = re.sub('^.*?-', '', data_id + '.wav')
+                        prediction_df = prediction_df.append(pred)
                     
         # In seconds
         prediction_df.onset = prediction_df.onset * pooling_time_ratio / (sample_rate / hop_length)

@@ -28,10 +28,12 @@ from models.RNN import BidirectionalGRU
 import config as cfg
 from models.CRNN import CRNN
 from utils.utils import AverageMeterSet, weights_init, ManyHotEncoder, SaveBest
-from evaluation_measures import compute_strong_metrics, segment_based_evaluation_df
+from evaluation_measures import compute_strong_metrics
+
+import pdb
 
 from dataset import SEDDatasetTrans as SEDDataset
-from transforms import Normalize, ApplyLog, GaussianNoise, TimeWarp, FrequencyMask, TimeMask, Gain, SpecAugment
+from transforms import Normalize, ApplyLog, GaussianNoise, TimeWarp, FrequencyMask, TimeMask, Gain
 from solver.mcd import MCDSolver
 # from solver.CNN import CNN
 # from solver.RNN import RNN
@@ -56,7 +58,7 @@ from radam import RAdam
 
 from solver.transformer import Transformer, TransformerSolver
 
-from model_tuning_transformer import search_best_threshold, search_best_median, search_best_accept_gap, \
+from model_tuning import search_best_threshold, search_best_median, search_best_accept_gap, \
     search_best_remove_short_duration, show_best
 
 
@@ -66,18 +68,11 @@ import tempfile
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 
-from CB_loss import CB_loss
-from sklearn.utils.class_weight import compute_class_weight
-import yaml
-
-
 
 
 best_event_iter = 0
 best_event_f1 = 0
 
-weak_samples_list = [192, 125, 164, 177, 208, 97, 165, 322, 522, 162]
-strong_samples_list = [40092, 69093, 28950, 23370, 25153, 51504, 34489, 30453, 122494, 53418]
 
 def get_sample_rate_and_hop_length(args):
     if args.n_frames == 864:
@@ -128,15 +123,13 @@ def get_scaling_factor(datasets, save_pickle_path):
 
 
 def train(solver, validation_loader, validation_df, decoder, args, exp_name, iteration=1000, log_interval=100,
-          save_best_eb=None, train_loader=None, train_df=None, mode='SED'):
+          save_best_eb=None, train_loader=None, train_df=None):
     for i in tqdm(range(1, iteration + 1)):
+        # ipdb.set_trace()
 
         best_f1 = 0
         best_iterations = 0
-        if mode == 'SED':
-            solver.train_one_step(warm_start=args.warm_start)
-        elif mode =='AT':
-            solver.train_one_step_at(warm_start=args.warm_start)
+        solver.train_one_step(warm_start=args.warm_start)
         if i % log_interval == 0 and i >= args.transformer_warmup_steps:
             
             sample_rate, hop_length = get_sample_rate_and_hop_length(args)
@@ -152,31 +145,24 @@ def train(solver, validation_loader, validation_df, decoder, args, exp_name, ite
             
             
             print(f'============= After training {i} iterations =============')
-            predictions, ave_precision, ave_recall, macro_f1, weak_f1 = solver.get_predictions(validation_loader, decoder,
+            predictions, macro_f1 = solver.get_predictions(validation_loader, decoder,
                                                  save_predictions=os.path.join(exp_name, 'predictions',
                                                                                f'iteration_{i}.csv'),
                                                  pooling_time_ratio=args.pooling_time_ratio,
                                                  sample_rate=sample_rate, hop_length=hop_length)
-            valid_events_metric, valid_segments_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
+            valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
                                                          sample_rate=sample_rate, hop_length=hop_length)
-#             valid_segments_metric = segment_based_evaluation_df(validation_df, predictions,
-#                                                                 time_resolution=1.)
+            # valid_segments_metric = segment_based_evaluation_df(validation_df, predictions,
+            #                                                     time_resolution=float(args.pooling_time_ratio))
             solver.save(os.path.join(exp_name, 'model', f'iteration_{i}.pth'),
                         os.path.join(exp_name, 'model', f'ema_iteration_{i}.pth'))
 
             global_valid = valid_events_metric.results_class_wise_average_metrics()['f_measure']['f_measure']
-            segment_valid = valid_segments_metric.results_class_wise_average_metrics()['f_measure']['f_measure']
-
+            
             # save to log text
             with open(os.path.join(exp_name, 'log', f'result_{i}th_iterations.txt'), 'w') as f:
-                f.write(f"Event-based macro-f1: {global_valid * 100:.4}\n")
-                f.write(f"Segment-based macro-f1: {segment_valid * 100:.4}\n")
-                f.write(f"Frame-based macro-f1: {macro_f1 * 100:.4}\n")
-                f.write(f"Frame-based ave_precision: {ave_precision * 100:.4}\n")
-                f.write(f"Frame-based ave_recall: {ave_recall * 100:.4}\n")
-                f.write(f"weak-f1: {weak_f1 * 100:.4}\n")
-                f.write(str(valid_events_metric))
-                f.write(str(valid_segments_metric))
+                f.write(f"Event-based macro-f1: {global_valid}\n")
+                f.write(f"Frame-based macro-f1: {macro_f1}\n")
 
             if save_best_eb.apply(global_valid):
                 best_iterations = i
@@ -188,14 +174,20 @@ def train(solver, validation_loader, validation_df, decoder, args, exp_name, ite
                 with open(os.path.join(exp_name, 'log', 'best_score.txt'), 'w') as f:
                     f.write("Event-based: best macro-f1 iteration: {}\n".format(best_event_iter))
                     f.write("Event-based: best macro-f1 score: {}\n".format(best_event_f1))
+
                     
-            # pdb.set_trace()
-            #                             global_valid = valid_events_metric.results_class_wise_average_metrics()['f_measure']['f_measure']
-            #                             # global_valid = global_valid + np.mean(weak_metric)
-            #                             if save_best_eb.apply(global_valid):
-            #                                 best_event_epoch = epoch + 1
-            #                                 best_event_f1 = global_valid
-            #                                 solver.save(os.path.join(args.exp_name, 'model', "best.pth"))
+                    
+def test(solver, validation_loader, validation_df, decoder, args, exp_name):
+    predictions, macro_f1 = solver.get_predictions(validation_loader, decoder,
+                                                 save_predictions=os.path.join(exp_name, 'saigen.csv'),
+                                                 pooling_time_ratio=args.pooling_time_ratio,
+                                                 sample_rate=16000, hop_length=323)
+    valid_events_metric = compute_strong_metrics(predictions, validation_df, pooling_time_ratio=None,
+                                                         sample_rate=16000, hop_length=323)
+    # save to log text
+    with open(os.path.join(exp_name, 'log', f'saigen.txt'), 'w') as f:
+        f.write(f"Event-based macro-f1: {global_valid}\n")
+        f.write(f"Frame-based macro-f1: {macro_f1}\n")
 
 
 def to_tensor(numpy_array, cuda=True):
@@ -305,11 +297,11 @@ def main(args):
     parser.add_argument('--model', default='crnn_baseline_feature', type=str)
     parser.add_argument('--pooling-time-ratio', default=1, type=int)
     parser.add_argument('--loss-function', default='BCE', type=str,
-                        choices=['BCE', 'FocalLoss', 'Dice', 'CBLoss'],
+                        choices=['BCE', 'FocalLoss', 'Dice'],
                         help='Type of loss function')
     parser.add_argument('--noise-reduction', default=False, type=strtobool)
     parser.add_argument('--pooling-operator', default='attention', type=str,
-                        choices=['max', 'mean', 'softmax', 'auto', 'cap', 'rap', 'attention', 'test'])
+                        choices=['max', 'mean', 'softmax', 'auto', 'cap', 'rap', 'attention'])
     parser.add_argument('--train-data', default='original', type=str,
                         choices=['original', 'noise_reduction', 'both'],
                         help='training data')
@@ -349,20 +341,11 @@ def main(args):
     parser.add_argument('--classifier', default='linear', type=str)
     parser.add_argument('--run-name', required=True, type=str,
                         help='exp_name for mlflow')
-    # Decoder
+    
     parser.add_argument('--after-conv', default=False, type= strtobool,
                         help='insert conv layer after each encoder block')
-    parser.add_argument(
-        "--averaged", default=False, type=strtobool
-    )
-    
 
     args = parser.parse_args(args)
-    averaged = args.averaged
-    with open(os.path.join('exp3', args.run_name, 'config.yml')) as f:
-        config = yaml.safe_load(f)
-        config['ssl'] = 0
-    args = argparse.Namespace(**config) 
 
     if args.input_layer_type == 1:
         args.transformer_input_layer = 'linear'
@@ -370,13 +353,16 @@ def main(args):
         args.transformer_input_layer = 'conv2d'
     elif args.input_layer_type == 3:
         args.transformer_input_layer = 'linear'
-    elif args.input_layer_type == 4:
-        args.transformer_input_layer = 'linear'
     else:
         raise ValueError
 
-#     os.makedirs(os.path.join('exp3', args.run_name), exist_ok=True)
-    exp_name = f'exp3/{args.run_name}'
+    exp_name = f"exp3/{args.run_name}"
+
+#     os.makedirs(os.path.join(exp_name, 'model'), exist_ok=True)
+#     os.makedirs(os.path.join(exp_name, 'predictions'), exist_ok=True)
+#     os.makedirs(os.path.join(exp_name, 'log'), exist_ok=True)
+
+    # logger = Logger(os.path.join(exp_name, 'log'))
 
     sr = '_16k' if args.n_frames == 496 else '_44k'
     mels = '_mel64' if args.mels == 64 else '_mel128'
@@ -398,21 +384,6 @@ def main(args):
         train_weak_json = json.load(train_weak_json)['utts']
         train_unlabel_json = json.load(train_unlabel_json)['utts']
         valid_json = json.load(valid_json)['utts']
-
-#     train_transforms = []
-#     test_transforms = []
-#     if args.log_mels:
-#         train_transforms.append(ApplyLog())
-#         test_transforms.append(ApplyLog())
-#     train_transforms.append(Normalize())
-#     test_transforms.append(Normalize())
-#     if args.add_noise:
-#         train_transforms.append(GaussianNoise())
-#         test_transforms.append(GaussianNoise())
-#     if args.use_specaugment:
-#         train_transforms.append(FrequencyMask())
-#         test_transforms.append(FrequencyMask())
-# transform functions for data loader
 
 
     if os.path.exists(f"sf{sr}{mels}.pickle"):
@@ -442,7 +413,7 @@ def main(args):
     if args.use_specaugment:
         # train_transforms = [Normalize(), TimeWarp(), FrequencyMask(), TimeMask()]
         if args.log_mels:
-            train_transforms = [ApplyLog(), scaling, Gain()]
+            train_transforms = [ApplyLog(), scaling, FrequencyMask()]
             test_transforms = [ApplyLog(), scaling]
         else:
             train_transforms = [scaling, FrequencyMask()]
@@ -454,13 +425,6 @@ def main(args):
         else:
             train_transforms = [scaling]
             test_transforms = [scaling]
-            
-    if args.add_noise:
-        train_transforms.append(GaussianNoise())
-        test_transforms.append(GaussianNoise())
-    if args.use_specaugment:
-        train_transforms.append(FrequencyMask())
-        test_transforms.append(FrequencyMask())
 
 #     unsupervised_transforms = [TimeShift(), FrequencyShift()]
     train_synth_dataset = SEDDataset(train_synth_json,
@@ -578,23 +542,8 @@ def main(args):
                             pooling=args.pooling_operator,
                             input_conv=False,
                             cnn_kwargs=None,
-                            classifier=args.classifier,
-                            pos_enc=True)
-    elif args.input_layer_type == 4:
-            assert args.transformer_input_layer == 'linear'
-            if args.pooling_time_ratio==8:
-                cnn_kwargs = {
-                    'pooling'   : [(2, 4), (2, 4), (2, 4)],
-                    'nb_filters': [64, 64, args.mels]
-                }
-            model = Transformer(input_dim=args.mels,
-                                n_class=10,
-                                args=args,
-                                pooling=args.pooling_operator,
-                                input_conv=True,
-                                cnn_kwargs=cnn_kwargs,
-                                classifier=args.classifier)
-            
+                            classifier=args.classifier)
+
     if args.input_layer_type == 1:
         cnn_kwargs = {
             'pooling'   : [(2, 4), (2, 4), (2, 8)],
@@ -606,9 +555,7 @@ def main(args):
                                 args=args,
                                 pooling=args.pooling_operator,
                                 input_conv=True,
-                                cnn_kwargs=cnn_kwargs,
-                                classifier=args.classifier,
-                                pos_enc=True)
+                                cnn_kwargs=cnn_kwargs)
     elif args.input_layer_type == 2:
         assert args.transformer_input_layer == 'conv2d'
         ema_model = Transformer(input_dim=args.mels,
@@ -624,17 +571,15 @@ def main(args):
                                 args=args,
                                 pooling=args.pooling_operator,
                                 input_conv=False,
-                                cnn_kwargs=None,
-                                classifier=args.classifier,
-                                pos_enc=True)
-    elif args.input_layer_type == 4:
-        assert args.transformer_input_layer == 'linear'
-        ema_model = Transformer(input_dim=args.mels,
-                                n_class=10,
-                                args=args,
-                                pooling=args.pooling_operator,
-                                input_conv=False,
                                 cnn_kwargs=None)
+
+    save_args(args, exp_name)
+    if args.input_layer_type == 1:
+        with open(os.path.join(exp_name, 'cnn_kwargs.pkl'), 'wb') as f:
+            pickle.dump(cnn_kwargs, f)
+
+    with open(os.path.join(exp_name, 'args.pkl'), 'wb') as f:
+        pickle.dump(args, f)
 
     for param in ema_model.parameters():
         param.detach_()
@@ -647,51 +592,41 @@ def main(args):
     
     
     
-#     with mlflow.start_run(run_name=args.run_name):
-#         # Log our parameters into mlflow
-#         for key, value in vars(args).items():
-#             mlflow.log_param(key, value)
+    with mlflow.start_run(run_name=args.run_name):
+        # Log our parameters into mlflow
+        for key, value in vars(args).items():
+            mlflow.log_param(key, value)
 
-#         # Create a SummaryWriter to write TensorBoard events locally
-#         output_dir = dirpath = tempfile.mkdtemp()
-#         writer = SummaryWriter(output_dir)
-#         print("Writing TensorBoard events locally to %s\n" % output_dir)
-    output_dir = dirpath = tempfile.mkdtemp()
-    writer = SummaryWriter(output_dir)
-    solver = TransformerSolver(model,
-                               ema_model,
-                               train_synth_loader,
-                               train_weak_loader,
-                               train_unlabel_loader,
-                               exp_name=exp_name,
-                               args=args,
-                               criterion=args.loss_function,
-                               consistency_criterion=torch.nn.MSELoss().cuda(),
-                               accum_grad=args.accum_grad,
-                               rampup_length=args.iterations // 2,
-                               optimizer=args.opt,
-                               consistency_cost=2,
-                               data_parallel=args.ngpu > 1,
-                               writer=writer)
-    
-    if averaged:
-        model_path = os.path.join("exp3", args.run_name, "model", "average.pth")
-        solver.load(model_path, model_path)
-    else:
-        print('++++++load============')
-        model_path = os.path.join("exp3", args.run_name, "model", "best_iteration.pth")
-        solver.load(model_path, model_path)
+        # Create a SummaryWriter to write TensorBoard events locally
+        output_dir = dirpath = tempfile.mkdtemp()
+        writer = SummaryWriter(output_dir)
+        print("Writing TensorBoard events locally to %s\n" % output_dir)
+
+        solver = TransformerSolver(model,
+                                   ema_model,
+                                   train_synth_loader,
+                                   train_weak_loader,
+                                   train_unlabel_loader,
+                                   exp_name=exp_name,
+                                   args=args,
+                                   criterion=args.loss_function,
+                                   consistency_criterion=torch.nn.MSELoss().cuda(),
+                                   accum_grad=args.accum_grad,
+                                   rampup_length=args.iterations // 2,
+                                   optimizer=args.opt,
+                                   consistency_cost=2,
+                                   data_parallel=args.ngpu > 1,
+                                   writer=writer)
+        filename = os.path.join(exp_name.replace('0920', '0904'), 'model', 'best_iteration.pth')
+        solver.load(filename, filename)
         
-#         train(solver, valid_loader, validation_df, many_hot_encoder.decode_strong, args, exp_name,
-#               iteration=args.iterations,
-#               log_interval=args.log_interval, save_best_eb=save_best_eb,
-#               train_loader=train_synth_loader, train_df=synth_df)
+        test(solver, valid_loader, validation_df, many_hot_encoder.decode_strong, args, exp_name)
 
-#         # Upload the TensorBoard event logs as a run artifact
-#         print("Uploading TensorBoard events as a run artifact...")
-#         mlflow.log_artifacts(output_dir, artifact_path="events")
-#         print("\nLaunch TensorBoard with:\n\ntensorboard --logdir=%s" %
-#             os.path.join(mlflow.get_artifact_uri(), "events"))
+        # Upload the TensorBoard event logs as a run artifact
+        print("Uploading TensorBoard events as a run artifact...")
+        mlflow.log_artifacts(output_dir, artifact_path="events")
+        print("\nLaunch TensorBoard with:\n\ntensorboard --logdir=%s" %
+            os.path.join(mlflow.get_artifact_uri(), "events"))
         
 #     with open(f'log/{args.run_name}.txt', 'w') as f:
 #         f.write("Event-based: best macro-f1 epoch: {}\n".format(best_event_iter))
@@ -726,89 +661,11 @@ def main(args):
 #     #                    functools.partial(search_up_gap, accepy_gap=list(best_fs.values())),
 #     #                    functools.partial(fill_up_gap, accepy_gap=list(best_fs.values())),]
 #     show_best(solver, valid_loader, many_hot_encoder.decode_strong, params=[best_th, best_fs, best_ag, best_rd])
-    
-    predictions, ave_precision, ave_recall, macro_f1, weak_f1 = solver.get_predictions(
-        valid_loader,
-        many_hot_encoder.decode_strong,
-        save_predictions=os.path.join(exp_name, "predictions", f"saigen.csv"),
-        mode="validation",
-        logger=None,
-        pooling_time_ratio=args.pooling_time_ratio,
-        sample_rate=sample_rate,
-        hop_length=hop_length,
-    )
-    valid_events_metric, valid_segments_metric = compute_strong_metrics(
-        predictions,
-        validation_df,
-        pooling_time_ratio=None,
-        sample_rate=sample_rate,
-        hop_length=hop_length,
-    )
-    
-    # ==== search best post process parameters ====
-    best_th, best_f1 = search_best_threshold(
-        solver.model,
-        valid_loader,
-        validation_df,
-        many_hot_encoder,
-        step=0.1,
-        pooling_time_ratio=args.pooling_time_ratio,
-        sample_rate=sample_rate,
-        hop_length=hop_length
-    )
-
-    best_fs, best_f1 = search_best_median(
-        solver.model,
-        valid_loader,
-        validation_df,
-        many_hot_encoder,
-        spans=list(range(1, 31, 2)),
-        pooling_time_ratio=args.pooling_time_ratio,
-        sample_rate=sample_rate,
-        hop_length=hop_length,
-        best_th=list(best_th.values())
-    )
-    
-    best_ag, best_f1 = search_best_accept_gap(
-        solver.model,
-        valid_loader,
-        validation_df,
-        many_hot_encoder,
-        gaps=list(range(0, 15)),
-        pooling_time_ratio=args.pooling_time_ratio,
-        sample_rate=sample_rate,
-        hop_length=hop_length,
-        best_th=list(best_th.values())
-    )
-    
-    best_rd, best_f1 = search_best_remove_short_duration(
-        solver.model,
-        valid_loader,
-        validation_df,
-        many_hot_encoder,
-        durations=list(range(0, 1)),
-        pooling_time_ratio=args.pooling_time_ratio,
-        sample_rate=sample_rate,
-        hop_length=hop_length,
-        best_th=list(best_th.values())
-    )
-    
-    show_best(
-        solver.model,
-        valid_loader,
-        validation_df,
-        many_hot_encoder,
-        pp_params=[best_th, best_fs, best_ag, best_rd],
-        pooling_time_ratio=args.pooling_time_ratio,
-        sample_rate=sample_rate, hop_length=hop_length
-    )
-    
-    
-    print('===================')
-    print('best_th', best_th)
-    print('best_fs', best_fs)
-    print('best_ag', best_ag)
-    print('best_rd', best_rd)
+#     print('===================')
+#     print('best_th', best_th)
+#     print('best_fs', best_fs)
+#     print('best_ag', best_ag)
+#     print('best_rd', best_rd)
 
 
 if __name__ == '__main__':

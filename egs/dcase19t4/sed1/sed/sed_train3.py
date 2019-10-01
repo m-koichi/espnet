@@ -69,6 +69,7 @@ from tqdm import tqdm
 
 from CB_loss import CB_loss
 from sklearn.utils.class_weight import compute_class_weight
+import h5py
 
 
 
@@ -309,7 +310,7 @@ def main(args):
     parser.add_argument('--model', default='crnn_baseline_feature', type=str)
     parser.add_argument('--pooling-time-ratio', default=1, type=int)
     parser.add_argument('--loss-function', default='BCE', type=str,
-                        choices=['BCE', 'FocalLoss', 'Dice', 'CBLoss'],
+                        choices=['BCE', 'FocalLoss', 'Dice', 'CBLoss', 'attention'],
                         help='Type of loss function')
     parser.add_argument('--noise-reduction', default=False, type=strtobool)
     parser.add_argument('--pooling-operator', default='attention', type=str,
@@ -389,6 +390,7 @@ def main(args):
     os.makedirs(os.path.join(exp_name, 'model'), exist_ok=True)
     os.makedirs(os.path.join(exp_name, 'predictions'), exist_ok=True)
     os.makedirs(os.path.join(exp_name, 'log'), exist_ok=True)
+    os.makedirs(os.path.join(exp_name, 'score'), exist_ok=True)
 
     # logger = Logger(os.path.join(exp_name, 'log'))
 

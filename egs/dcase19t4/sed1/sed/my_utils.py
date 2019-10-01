@@ -234,7 +234,8 @@ def get_batch_predictions_trans(model, data_loader, decoder, post_processing=Non
 
         if torch.cuda.is_available():
             batch_input = batch_input.cuda()
-        pred_strong, pred_weak = model(batch_input)
+        # pred_strong, pred_weak, _ = model(batch_input)
+        pred_strong, pred_weak, _ = model(batch_input)
         
         target_np = target.numpy()
 

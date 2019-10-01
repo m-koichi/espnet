@@ -18,7 +18,8 @@ class Decoder(torch.nn.Module):
     def __init__(self, odim, args):
         super(Decoder, self).__init__()
         self.embed = torch.nn.Sequential(
-            torch.nn.Embedding(odim, args.adim),
+            # torch.nn.Embedding(odim, args.adim),
+            torch.nn.Linear(10, args.adim, bias=False),
             PositionalEncoding(args.adim, args.dropout_rate)
         )
         self.decoders = repeat(

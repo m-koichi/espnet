@@ -306,7 +306,7 @@ def remove_short_duration(event_roll, reject_duration=10):
     return event_roll
 
 def search_best_median(model, valid_loader, validation_df, many_hot_encoder, spans,
-                       pooling_time_ratio, sample_rate, hop_length, best_th=None, target='Frame'):
+                       pooling_time_ratio, sample_rate, hop_length, best_th=None, target='Event'):
     # Event = namedtuple('Event', ('thres', 'f1'))
     best_span = {k: 1 for k in LABELS}
     best_f1 = {k: 0 for k in LABELS}
@@ -365,7 +365,7 @@ def search_best_median(model, valid_loader, validation_df, many_hot_encoder, spa
 
 
 def search_best_accept_gap(model, valid_loader, validation_df, many_hot_encoder, gaps,
-                           pooling_time_ratio, sample_rate, hop_length, best_th=None, target='Frame'):
+                           pooling_time_ratio, sample_rate, hop_length, best_th=None, target='Event'):
     # Event = namedtuple('Event', ('thres', 'f1'))
     best_gap = {k: 1 for k in LABELS}
     best_f1 = {k: 0 for k in LABELS}
@@ -425,7 +425,7 @@ def search_best_accept_gap(model, valid_loader, validation_df, many_hot_encoder,
 
 
 def search_best_remove_short_duration(model, valid_loader, validation_df, many_hot_encoder, durations,
-                                      pooling_time_ratio, sample_rate, hop_length, best_th=None, target='Frame'):
+                                      pooling_time_ratio, sample_rate, hop_length, best_th=None, target='Event'):
     # Event = namedtuple('Event', ('thres', 'f1'))
     best_duration = {k: 1 for k in LABELS}
     best_f1 = {k: 0 for k in LABELS}
