@@ -33,8 +33,8 @@ class EncoderLayer(nn.Module):
         :rtype: Tuple[torch.Tensor, torch.Tensor]
         """
         nx = self.norm1(x)
-        x, attn_ws = self.self_attn(nx, nx, nx, mask)
-        x = x + self.dropout(x)
+        attn_x, attn_ws = self.self_attn(nx, nx, nx, mask)
+        x = x + self.dropout(attn_x)
 #         x = x + self.dropout(self.self_attn(nx, nx, nx, mask))
         nx = self.norm2(x)
         nx = x + self.dropout(self.feed_forward(nx))
