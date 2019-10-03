@@ -69,6 +69,7 @@ from model_tuning import search_best_threshold, search_best_median, search_best_
 import mlflow
 import tempfile
 from tensorboardX import SummaryWriter
+from torchsummary import summary
 from solver.transformer import Transformer, TransformerSolver
 from functools import wraps
 from radam import RAdam
@@ -1602,6 +1603,9 @@ def main(args):
     crnn_ema = crnn_ema.to('cuda')
     for param in crnn_ema.parameters():
         param.detach_()
+    print(crnn)
+    summary(crnn.cuda(), (1, 496, 64))
+    aaaaaa
     
     sample_rate, hop_length = get_sample_rate_and_hop_length(args)
 

@@ -64,6 +64,7 @@ from model_tuning import search_best_threshold, search_best_median, search_best_
 import mlflow
 import pickle
 import tempfile
+from torchsummary import summary
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 
@@ -361,6 +362,8 @@ def main(args):
                         help='use scaling factor extracted by training dataset')
     parser.add_argument('--ssl', default=False, type= strtobool,
                         help='use scaling factor extracted by training dataset')
+    parser.add_argument('--pretrained', default=None, type= str,
+                        help='use scaling factor extracted by training dataset')
     parser.add_argument('--data-augmentation', default=False, type= strtobool,
                         help='use scaling factor extracted by training dataset')
     
@@ -605,13 +608,22 @@ def main(args):
                             cnn_kwargs=cnn_kwargs,
                             classifier=args.classifier)
     elif args.input_layer_type == 2:
+        cnn_kwargs = {
+            'pooling'   : [(1, 4), (1, 4), (1, 4)],
+            'nb_filters': [64, 64, args.mels]
+        }
+        if args.pooling_time_ratio==8:
+            cnn_kwargs = {
+                'pooling'   : [(2, 4), (2, 4), (2, 4)],
+                'nb_filters': [64, 64, args.mels]
+            }
         assert args.transformer_input_layer == 'linear'
         model = Transformer(input_dim=args.mels,
                             n_class=10,
                             args=args,
                             pooling=args.pooling_operator,
                             input_conv=True,
-                            cnn_kwargs=None,
+                            cnn_kwargs=cnn_kwargs,
                             classifier=args.classifier)
     elif args.input_layer_type == 3:
         assert args.transformer_input_layer == 'linear'
@@ -692,6 +704,8 @@ def main(args):
         param.detach_()
 
     print(model)
+#     summary(model.cuda(), (1, 496, 64))
+#     aaaaa
     
     sample_rate, hop_length = get_sample_rate_and_hop_length(args)
 
@@ -705,7 +719,10 @@ def main(args):
 #         print(i, no_of_samples)
 #     aaaaa
     
-    
+    if args.pretrained is not None:
+        pretrained = os.path.join("exp3", args.pretrained, "model", "best_iteration.pth")
+    else:
+        pretrained = None
     
     with mlflow.start_run(run_name=args.run_name):
         # Log our parameters into mlflow
@@ -731,7 +748,8 @@ def main(args):
                                    optimizer=args.opt,
                                    consistency_cost=2,
                                    data_parallel=args.ngpu > 1,
-                                   writer=writer)
+                                   writer=writer,
+                                   pretrained=pretrained)
         
         train(solver, valid_loader, validation_df, many_hot_encoder.decode_strong, args, exp_name,
               iteration=args.iterations,

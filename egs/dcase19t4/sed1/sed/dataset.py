@@ -205,7 +205,7 @@ class SEDDatasetTrans(Dataset):
     '''Sound Event Detection
     '''
     def __init__(self, json_data, label_type, sequence_length, pooling_time_ratio=1, transforms=None,
-                 time_shift=True):
+                 add_one_frame=True):
         # self.batchset = batchset
         self.json_data = json_data
         self.label_type = label_type
@@ -213,7 +213,7 @@ class SEDDatasetTrans(Dataset):
         self.data_ids = [k for k in self.json_data.keys()]
         self.transforms = transforms
         self.pooling_time_ratio = pooling_time_ratio
-        self.time_shift = time_shift
+        self.add_one_frame = add_one_frame
         
     def __getitem__(self, index):
         data_id = self.data_ids[index]
@@ -233,7 +233,7 @@ class SEDDatasetTrans(Dataset):
                         x, y = transform(x, y)
                     else:
                         x = transform(x)
-            x, mask = pad_trunc_sequence_mask(x, self.sequence_length)
+            x, mask = pad_trunc_sequence_mask(x, self.sequence_length, add_one_frame=self.add_one_frame)
             y = y[self.pooling_time_ratio-1::self.pooling_time_ratio, :]
                 # x, y = TimeShift()(x, y)
             assert x.shape[0] == y.shape[0] * self.pooling_time_ratio, \
@@ -242,14 +242,14 @@ class SEDDatasetTrans(Dataset):
             if self.transforms:
                 for transform in self.transforms:
                     x = transform(x)
-            x, mask = pad_trunc_sequence_mask(x, self.sequence_length)
+            x, mask = pad_trunc_sequence_mask(x, self.sequence_length, add_one_frame=self.add_one_frame)
             output = self.json_data[data_id]['output'][0]
             y = np.array(output['label']['tokenid'])
         elif self.label_type == 'unlabel':
             if self.transforms:
                 for transform in self.transforms:
                     x = transform(x)
-            x, mask = pad_trunc_sequence_mask(x, self.sequence_length)
+            x, mask = pad_trunc_sequence_mask(x, self.sequence_length, add_one_frame=self.add_one_frame)
             y = np.array([-1])
         else:
             raise ValueError(f'label_type "{self.label_type}" is not suported.')
@@ -301,7 +301,7 @@ class SEDDatasetTransEMA(Dataset):
     '''Sound Event Detection
     '''
     def __init__(self, json_data, label_type, sequence_length, pooling_time_ratio=1, transforms=None,
-                 time_shift=True):
+                 add_one_frame=False):
         # self.batchset = batchset
         self.json_data = json_data
         self.label_type = label_type
@@ -309,7 +309,7 @@ class SEDDatasetTransEMA(Dataset):
         self.data_ids = [k for k in self.json_data.keys()]
         self.transforms = transforms
         self.pooling_time_ratio = pooling_time_ratio
-        self.time_shift = time_shift
+        self.add_one_frame = add_one_frame
         
     def __getitem__(self, index):
         data_id = self.data_ids[index]
@@ -323,21 +323,15 @@ class SEDDatasetTransEMA(Dataset):
                 # pdb.set_trace()
                 x1 = transform(x1)
                 x2 = transform(x2)
-        x1, mask = pad_trunc_sequence_mask(x1, self.sequence_length)
-        x2, mask = pad_trunc_sequence_mask(x2, self.sequence_length)
+        x1, mask = pad_trunc_sequence_mask(x1, self.sequence_length, add_one_frame=self.add_one_frame)
+        x2, mask = pad_trunc_sequence_mask(x2, self.sequence_length, add_one_frame=self.add_one_frame)
 
         if self.label_type == 'strong':
             output = self.json_data[data_id]['output'][0]
             y = np.zeros((output['label'][0]['shape'][1], len(output['label'])))
             for label_idx, label in enumerate(output['label']):
                 y[:, label_idx] = np.array(label['tokenid'])
-            # pdb.set_trace()
             y = y[self.pooling_time_ratio-1::self.pooling_time_ratio, :]
-            # if self.time_shift:
-                # import ipdb
-#             ipdb.set_trace()
-                # x, y = TimeShift()(x, y)
-#             y[0,:] = 0
             assert x1.shape[0] == y.shape[0] * self.pooling_time_ratio, \
                 f'mismatch shape x.shape[0]={x1.shape[0]} and y.shape[0]={y.shape[0]}'
         elif self.label_type == 'weak':

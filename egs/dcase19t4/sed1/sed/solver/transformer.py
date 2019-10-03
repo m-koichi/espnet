@@ -84,7 +84,9 @@ class Transformer(torch.nn.Module):
             if self.args.input_layer_type == 1:
                 self.cnn = CNN(n_in_channel=1, activation="Relu", conv_dropout=args.dropout, **cnn_kwargs)
             if self.args.input_layer_type == 2:
-                self.cnn = Conv2dSubsampling(idim=args.mels, odim=args.mels)
+#                 self.cnn = Conv2dSubsampling(idim=args.mels, odim=args.mels)
+                self.cnn = CNN(n_in_channel=1, activation="Relu", conv_dropout=args.dropout, **cnn_kwargs)
+                self.rnn = BidirectionalGRU(args.adim//2, args.adim//4, dropout=args.dropout, num_layers=2)
 
         self.encoder = Encoder(input_dim, args, pos_enc=pos_enc)
         if classifier == 'linear':
@@ -127,7 +129,10 @@ class Transformer(torch.nn.Module):
             x = self.cnn(x)
             x = x.squeeze(-1).permute(0, 2, 1)
         if self.args.input_layer_type == 2:
-            x, _ = self.cnn(x, None)
+#             x, _ = self.cnn(x, None)
+            x = self.cnn(x)
+            x = x.squeeze(-1).permute(0, 2, 1)
+            x = self.rnn(x)
 
         if self.args.input_layer_type == 3:
             x = x.squeeze(1)
@@ -137,7 +142,7 @@ class Transformer(torch.nn.Module):
             x = self.rnn(x)
             x[:, 0, :] = 1
         if self.pooling == 'transformer' or self.pooling == 'transformer2':
-            mask = None
+            # mask = None
             class_frame = torch.ones(x.size(0), 1, x.size(2)).cuda() * 0.2
             x = torch.cat([class_frame, x], dim=1)
 #             x[:, 0, :] = 1 # replace first frame to one vector
@@ -242,9 +247,12 @@ class TransformerSolver(object):
                  consistency_cost=2,
                  data_parallel=False,
                  writer=None,
-                 mode='SED'):
+                 mode='SED',
+                 pretrained=None):
         self.model = model.cuda() if torch.cuda.is_available() else model
         self.ema_model = ema_model.cuda() if torch.cuda.is_available() else ema_model
+        if pretrained is not None:
+            self.load(pretrained, pretrained)
         
         self.exp_name = exp_name
         
