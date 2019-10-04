@@ -742,7 +742,7 @@ def main(args):
                                    exp_name=exp_name,
                                    args=args,
                                    criterion=args.loss_function,
-                                   consistency_criterion=torch.nn.MSELoss().cuda(),
+                                   consistency_criterion=torch.nn.KLDivLoss().cuda(),
                                    accum_grad=args.accum_grad,
                                    rampup_length=args.iterations // 2,
                                    optimizer=args.opt,
