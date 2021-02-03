@@ -8,8 +8,8 @@ set -o pipefail
 sed_config=conf/train_conf.yaml
 
 ./sed.sh \
-    --stage 10 \
-    --stop_stage 10 \
+    --stage 1 \
+    --stop_stage 5 \
     --sed_tag "${sed_tag}" \
     --sed_config "${sed_config}" \
     --train_set train \

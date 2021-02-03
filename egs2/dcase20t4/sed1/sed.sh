@@ -626,7 +626,7 @@ if ! "${skip_train}"; then
             --valid_data_path_and_name_and_type "${_sed_valid_dir}/${_scp},audio,${_type}" \
             --valid_data_path_and_name_and_type "${_sed_valid_dir}/labels.txt,label,text " \
             --valid_shape_file "${sed_stats_dir}/valid/audio_shape" \
-            --resume true \
+            --resume false \
             --fold_length "${sed_audio_fold_length}" \
             --output_dir "${sed_exp}" \
             ${_opts} ${sed_args}
